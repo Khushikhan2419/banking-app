@@ -113,16 +113,16 @@ ALB hostname shows up — that URL is written to the job summary.
 **One-time setup before the first CI run:**
 
 1. **Remote state** (required — GitHub Actions has no local disk between runs):
+
+   Run the bootstrap script once (in AWS CloudShell, or any shell with the
+   AWS CLI configured against this account):
    ```bash
-   aws s3 mb s3://veerabank-terraform-state-517798688687 --region us-east-1
-   aws dynamodb create-table \
-     --table-name veerabank-terraform-locks \
-     --attribute-definitions AttributeName=LockID,AttributeType=S \
-     --key-schema AttributeName=LockID,KeyType=HASH \
-     --billing-mode PAY_PER_REQUEST --region us-east-1
+   bash scripts/bootstrap-state.sh
    ```
-   Then uncomment the `backend "s3" {}` block in `terraform/main.tf` and fill
-   in the bucket name, and commit that.
+   This creates the S3 bucket (`veerabank-terraform-state-517798688687`,
+   versioned + encrypted + public access blocked) and the DynamoDB lock
+   table (`veerabank-terraform-locks`) that `terraform/main.tf`'s
+   `backend "s3"` block already points at. Safe to re-run.
 
 2. **GitHub secrets** (repo → Settings → Secrets and variables → Actions):
    - `AWS_ACCESS_KEY_ID`

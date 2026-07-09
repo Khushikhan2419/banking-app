@@ -1,1 +1,131 @@
-hi
+name: Deploy VeeraBank
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  AWS_REGION: ap-south-1
+  PROJECT_NAME: veerabank
+  ENVIRONMENT: dev
+  EKS_CLUSTER_NAME: veerabank-dev-eks
+  NAMESPACE: veerabank
+
+permissions:
+  id-token: write   # not used yet (static keys below), kept for future OIDC swap
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Terraform: VPC, EKS, DynamoDB, ECR, ALB controller, IRSA roles
+  # ---------------------------------------------------------------------
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      ecr_repository_url: ${{ steps.tf_out.outputs.ecr_repository_url }}
+      backend_irsa_role_arn: ${{ steps.tf_out.outputs.backend_irsa_role_arn }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+
+      - name: Capture outputs
+        id: tf_out
+        run: |
+          echo "ecr_repository_url=$(terraform output -raw ecr_repository_url)" >> "$GITHUB_OUTPUT"
+          echo "backend_irsa_role_arn=$(terraform output -raw backend_irsa_role_arn)" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------
+  # 2. Build + push image, deploy to EKS, surface the ingress URL
+  # ---------------------------------------------------------------------
+  deploy:
+    needs: terraform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr_login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          ECR_URL: ${{ needs.terraform.outputs.ecr_repository_url }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd backend
+          docker build -t "$ECR_URL:$IMAGE_TAG" -t "$ECR_URL:latest" .
+          docker push "$ECR_URL:$IMAGE_TAG"
+          docker push "$ECR_URL:latest"
+
+      - name: Point kubectl at the cluster
+        run: aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Render manifests
+        env:
+          ECR_URL: ${{ needs.terraform.outputs.ecr_repository_url }}
+          IMAGE_TAG: ${{ github.sha }}
+          ROLE_ARN: ${{ needs.terraform.outputs.backend_irsa_role_arn }}
+        run: |
+          mkdir -p rendered
+          sed "s|arn:aws:iam::<ACCOUNT_ID>:role/veerabank-dev-backend-dynamodb|$ROLE_ARN|" \
+            k8s/serviceaccount.yaml > rendered/serviceaccount.yaml
+          sed "s|<ECR_REPO_URL>:latest|$ECR_URL:$IMAGE_TAG|" \
+            k8s/deployment.yaml > rendered/deployment.yaml
+          cp k8s/namespace.yaml k8s/service.yaml k8s/ingress.yaml rendered/
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f rendered/namespace.yaml
+          kubectl apply -f rendered/serviceaccount.yaml
+          kubectl apply -f rendered/deployment.yaml
+          kubectl apply -f rendered/service.yaml
+          kubectl apply -f rendered/ingress.yaml
+
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/backend -n ${{ env.NAMESPACE }} --timeout=180s
+
+      - name: Wait for ALB and print the ingress URL
+        run: |
+          echo "Waiting for ALB hostname..."
+          for i in $(seq 1 30); do
+            HOST=$(kubectl get ingress backend-ingress -n ${{ env.NAMESPACE }} \
+              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$HOST" ]; then
+              echo "http://$HOST" > ingress_url.txt
+              break
+            fi
+            sleep 10
+          done
+          if [ ! -s ingress_url.txt ]; then
+            echo "ALB hostname not ready yet — check 'kubectl get ingress -n ${{ env.NAMESPACE }}' manually."
+            exit 0
+          fi
+          URL=$(cat ingress_url.txt)
+          echo "### 🚀 Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "INGRESS_URL=$URL" >> "$GITHUB_ENV"
+          echo "$URL"

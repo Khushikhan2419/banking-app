@@ -41,6 +41,10 @@ jobs:
         with:
           terraform_version: "1.9.0"
 
+      - name: Ensure remote state bucket + lock table exist
+        working-directory: .
+        run: bash scripts/bootstrap-state.sh
+
       - name: Terraform Init
         run: terraform init
 

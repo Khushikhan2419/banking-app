@@ -21,7 +21,7 @@ terraform {
   # backend "s3" {
   #   bucket         = "veerabank-terraform-state-<your-suffix>"
   #   key            = "eks-dynamodb/terraform.tfstate"
-  #   region         = "ap-south-1"
+  #   region         = "us-east-1"
   #   dynamodb_table = "veerabank-terraform-locks"
   #   encrypt        = true
   # }

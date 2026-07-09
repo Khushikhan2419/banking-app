@@ -35,7 +35,7 @@ terraform output
 ## 2. Point kubectl at the cluster
 
 ```bash
-aws eks update-kubeconfig --region ap-south-1 --name veerabank-dev-eks
+aws eks update-kubeconfig --region us-east-1 --name veerabank-dev-eks
 ```
 
 ## 3. Build and push the backend image to ECR
@@ -43,7 +43,7 @@ aws eks update-kubeconfig --region ap-south-1 --name veerabank-dev-eks
 ```bash
 cd ../backend
 ECR_URL=$(cd ../terraform && terraform output -raw ecr_repository_url)
-aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin $ECR_URL
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_URL
 docker build -t $ECR_URL:latest .
 docker push $ECR_URL:latest
 ```
@@ -114,12 +114,12 @@ ALB hostname shows up — that URL is written to the job summary.
 
 1. **Remote state** (required — GitHub Actions has no local disk between runs):
    ```bash
-   aws s3 mb s3://veerabank-terraform-state-<your-suffix> --region ap-south-1
+   aws s3 mb s3://veerabank-terraform-state-<your-suffix> --region us-east-1
    aws dynamodb create-table \
      --table-name veerabank-terraform-locks \
      --attribute-definitions AttributeName=LockID,AttributeType=S \
      --key-schema AttributeName=LockID,KeyType=HASH \
-     --billing-mode PAY_PER_REQUEST --region ap-south-1
+     --billing-mode PAY_PER_REQUEST --region us-east-1
    ```
    Then uncomment the `backend "s3" {}` block in `terraform/main.tf` and fill
    in the bucket name, and commit that.

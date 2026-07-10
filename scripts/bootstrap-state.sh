@@ -9,44 +9,87 @@
 
 set -euo pipefail
 
-BUCKET="veerabank-tfstate-517798688687-6b6ca11c"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MAIN_TF="$SCRIPT_DIR/../terraform/main.tf"
+STATE_FILE="$SCRIPT_DIR/.tfstate-bucket-name"  # remembers the bucket we actually created
+
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
 TABLE="veerabank-terraform-locks"
 REGION="us-east-1"
+MAX_ATTEMPTS=5
+
+# Reuse whatever bucket we successfully created on a previous run, if any -
+# state must live in the SAME bucket across runs, so we never want to
+# silently start pointing at a brand new empty bucket once one already works.
+TF_BUCKET="$(grep -oP '(?<=bucket\s{7}= ")[^"]+' "$MAIN_TF" | head -1)"
+
+if [ -f "$STATE_FILE" ]; then
+  BUCKET="$(cat "$STATE_FILE")"
+  echo "== Reusing previously-bootstrapped bucket (from $STATE_FILE): $BUCKET =="
+elif [ -n "$TF_BUCKET" ] && aws s3api head-bucket --bucket "$TF_BUCKET" 2>/dev/null; then
+  # No local state file (e.g. fresh checkout), but main.tf already points at
+  # a bucket that exists and this account can reach - reuse it rather than
+  # spawning a new one.
+  BUCKET="$TF_BUCKET"
+  echo "== Reusing bucket already referenced in terraform/main.tf: $BUCKET =="
+else
+  BUCKET="veerabank-tfstate-${ACCOUNT_ID}-$(openssl rand -hex 4 2>/dev/null || echo "$RANDOM$RANDOM")"
+  echo "== No existing bucket found - generating a new unique name: $BUCKET =="
+fi
 
 echo "== Creating S3 bucket: $BUCKET in $REGION =="
+
 if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   echo "Bucket already exists and is accessible, skipping create."
 else
-  # head-bucket said "no" (404, or a 403 we can't distinguish from 404),
-  # but create-bucket can still fail with BucketAlreadyExists - notably
-  # us-east-1 returns that generic error even when *this* account already
-  # owns the bucket, instead of the friendlier BucketAlreadyOwnedByYou.
-  # So: attempt the create, then re-check access rather than trusting
-  # create-bucket's error message alone.
-  set +e
-  CREATE_OUTPUT=$(aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" 2>&1)
-  CREATE_STATUS=$?
-  set -e
+  attempt=1
+  while :; do
+    # head-bucket said "no" (404, or a 403 we can't distinguish from 404),
+    # but create-bucket can still fail with BucketAlreadyExists - notably
+    # us-east-1 returns that generic error even when *this* account already
+    # owns the bucket, instead of the friendlier BucketAlreadyOwnedByYou.
+    # So: attempt the create, then re-check access rather than trusting
+    # create-bucket's error message alone.
+    set +e
+    CREATE_OUTPUT=$(aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" 2>&1)
+    CREATE_STATUS=$?
+    set -e
 
-  if [ $CREATE_STATUS -eq 0 ]; then
-    echo "Bucket created."
-  elif aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-    echo "Bucket creation reported an error, but it's accessible under this account - continuing."
-  else
+    if [ $CREATE_STATUS -eq 0 ]; then
+      echo "Bucket created: $BUCKET"
+      break
+    elif aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+      echo "Bucket creation reported an error, but it's accessible under this account - continuing."
+      break
+    fi
+
     echo "$CREATE_OUTPUT" >&2
-    echo ""
-    echo "== Bucket name '$BUCKET' is not usable by this account =="
-    echo "S3 bucket names are unique across ALL of AWS, not just your account."
-    echo "This exact name is already taken by someone else (or an orphaned"
-    echo "bucket from another account). Pick a new name, e.g.:"
-    echo ""
-    echo "  BUCKET=\"veerabank-tfstate-\$(date +%s)\""
-    echo ""
-    echo "...then update both this script's BUCKET variable and the"
-    echo "backend \"s3\" { bucket = ... } block in terraform/main.tf to match,"
-    echo "and re-run this script."
-    exit 1
-  fi
+    if [ $attempt -ge $MAX_ATTEMPTS ]; then
+      echo ""
+      echo "== Bucket name '$BUCKET' is not usable after $MAX_ATTEMPTS attempts =="
+      echo "S3 bucket names are unique across ALL of AWS, not just your account."
+      echo "Every generated name collided or is stuck mid-delete elsewhere."
+      echo "Try re-running this script (it generates a fresh random name each"
+      echo "time it doesn't already have one recorded in scripts/.tfstate-bucket-name)."
+      exit 1
+    fi
+
+    NEW_BUCKET="veerabank-tfstate-${ACCOUNT_ID}-$(openssl rand -hex 4 2>/dev/null || echo "$RANDOM$RANDOM")"
+    echo "== '$BUCKET' unusable, retrying with a new unique name: $NEW_BUCKET (attempt $((attempt+1))/$MAX_ATTEMPTS) =="
+    BUCKET="$NEW_BUCKET"
+    attempt=$((attempt+1))
+  done
+fi
+
+# Remember this bucket for next time, and keep terraform/main.tf's backend
+# block pointed at whatever bucket we actually ended up with, automatically.
+echo "$BUCKET" > "$STATE_FILE"
+
+CURRENT_TF_BUCKET="$(grep -oP '(?<=bucket\s{7}= ")[^"]+' "$MAIN_TF" | head -1)"
+if [ "$CURRENT_TF_BUCKET" != "$BUCKET" ]; then
+  echo "== Updating terraform/main.tf backend bucket: $CURRENT_TF_BUCKET -> $BUCKET =="
+  sed -i.bak "s/bucket         = \"${CURRENT_TF_BUCKET}\"/bucket         = \"${BUCKET}\"/" "$MAIN_TF"
+  rm -f "${MAIN_TF}.bak"
 fi
 
 echo "== Enabling versioning =="

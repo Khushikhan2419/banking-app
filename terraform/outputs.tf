@@ -20,10 +20,6 @@ output "dynamodb_accounts_table" {
   value = aws_dynamodb_table.accounts.name
 }
 
-output "dynamodb_transactions_table" {
-  value = aws_dynamodb_table.transactions.name
-}
-
 output "backend_irsa_role_arn" {
   description = "Put this on the Kubernetes ServiceAccount annotation eks.amazonaws.com/role-arn"
   value       = module.backend_app_irsa.iam_role_arn
@@ -31,4 +27,27 @@ output "backend_irsa_role_arn" {
 
 output "vpc_id" {
   value = local.vpc_id
+}
+
+output "users_db_endpoint" {
+  description = "Aurora MySQL cluster endpoint for the users-service"
+  value       = aws_rds_cluster.users.endpoint
+}
+
+output "users_db_name" {
+  value = aws_rds_cluster.users.database_name
+}
+
+output "users_db_secret_arn" {
+  description = "Secrets Manager ARN holding the users-service DB credentials"
+  value       = aws_secretsmanager_secret.users_db.arn
+}
+
+output "transaction_history_bucket" {
+  value = aws_s3_bucket.transaction_history.bucket
+}
+
+output "transactions_history_api_url" {
+  description = "Base URL of the transactions-history API Gateway (Lambda-backed, reads/writes S3)"
+  value       = aws_apigatewayv2_stage.transactions_history.invoke_url
 }

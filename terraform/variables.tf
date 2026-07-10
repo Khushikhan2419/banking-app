@@ -70,3 +70,9 @@ variable "dynamodb_billing_mode" {
   type        = string
   default     = "PAY_PER_REQUEST"
 }
+
+variable "notification_email" {
+  description = "Real email address to subscribe to the user-registered SNS topic. Leave blank to skip creating the email subscription."
+  type        = string
+  default     = ""
+}

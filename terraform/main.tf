@@ -14,6 +14,14 @@ terraform {
       source  = "hashicorp/helm"
       version = "~> 2.14"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.5"
+    }
   }
 
   # Remote state - S3 bucket + DynamoDB lock table (create once, see README).

@@ -149,8 +149,9 @@ module "backend_app_irsa" {
   role_name = "${var.project_name}-${var.environment}-backend-dynamodb"
 
   role_policy_arns = {
-    dynamodb = aws_iam_policy.dynamodb_app_access.arn
-    sns      = aws_iam_policy.sns_publish_user_registered.arn
+    dynamodb   = aws_iam_policy.dynamodb_app_access.arn
+    sns        = aws_iam_policy.sns_publish_user_registered.arn
+    users_db   = aws_iam_policy.users_db_secret_access.arn
   }
 
   oidc_providers = {

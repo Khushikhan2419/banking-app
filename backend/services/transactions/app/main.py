@@ -1,8 +1,17 @@
+"""Transactions microservice.
+
+Balances still live in DynamoDB (accounts table, updated atomically).
+Transaction *history* now lives in S3, written and read through the
+transactions-history Lambda behind API Gateway (see terraform/lambda.tf +
+terraform/s3.tf) instead of a DynamoDB table - this service just calls
+that HTTP API.
+"""
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Literal, List
 
+import requests
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from botocore.exceptions import ClientError
@@ -13,7 +22,10 @@ from common.aws_clients import table
 
 app = FastAPI(title="VeeraBank Transactions Service", version="1.0.0")
 accounts_table = table("accounts")
-transactions_table = table("transactions")
+
+# Base URL of the transactions-history API Gateway stage, e.g.
+# https://abc123.execute-api.us-east-1.amazonaws.com
+HISTORY_API_URL = os.environ.get("TRANSACTIONS_HISTORY_API_URL", "").rstrip("/")
 
 
 class TransactionCreate(BaseModel):
@@ -39,6 +51,25 @@ def healthz():
 @app.get("/")
 def root():
     return {"service": "transactions-service", "status": "running"}
+
+
+def _write_history(txn_item: dict):
+    if not HISTORY_API_URL:
+        print("[transactions] TRANSACTIONS_HISTORY_API_URL not set, skipping S3 history write")
+        return
+    # Decimal isn't JSON-serializable - amount/balance_after are strings on
+    # the wire and get cast back to Decimal by the Transaction response model.
+    json_safe = {**txn_item, "amount": str(txn_item["amount"]), "balance_after": str(txn_item["balance_after"])}
+    resp = requests.post(f"{HISTORY_API_URL}/history", json=json_safe, timeout=5)
+    resp.raise_for_status()
+
+
+def _read_history(account_id: str) -> list:
+    if not HISTORY_API_URL:
+        return []
+    resp = requests.get(f"{HISTORY_API_URL}/history/{account_id}", timeout=5)
+    resp.raise_for_status()
+    return resp.json()
 
 
 @app.post("/transactions", response_model=Transaction, status_code=201)
@@ -82,15 +113,10 @@ def create_transaction(payload: TransactionCreate):
         "balance_after": new_balance,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    transactions_table.put_item(Item=txn_item)
+    _write_history(txn_item)
     return txn_item
 
 
 @app.get("/transactions/{account_id}", response_model=List[Transaction])
 def list_transactions(account_id: str):
-    resp = transactions_table.query(
-        KeyConditionExpression="account_id = :aid",
-        ExpressionAttributeValues={":aid": account_id},
-        ScanIndexForward=False,
-    )
-    return resp.get("Items", [])
+    return _read_history(account_id)

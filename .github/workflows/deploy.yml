@@ -178,3 +178,4 @@ jobs:
           echo "Frontend: $URL/" >> "$GITHUB_STEP_SUMMARY"
           echo "Users API: $URL/users/register" >> "$GITHUB_STEP_SUMMARY"
           echo "$URL"
+

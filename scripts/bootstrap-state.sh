@@ -21,7 +21,7 @@ MAX_ATTEMPTS=5
 # Reuse whatever bucket we successfully created on a previous run, if any -
 # state must live in the SAME bucket across runs, so we never want to
 # silently start pointing at a brand new empty bucket once one already works.
-TF_BUCKET="$(grep -oP '(?<=bucket\s{7}= ")[^"]+' "$MAIN_TF" | head -1)"
+TF_BUCKET="$(grep -oP 'bucket\s+= "\K[^"]+' "$MAIN_TF" | head -1 || true)"
 
 if [ -f "$STATE_FILE" ]; then
   BUCKET="$(cat "$STATE_FILE")"
@@ -85,10 +85,16 @@ fi
 # block pointed at whatever bucket we actually ended up with, automatically.
 echo "$BUCKET" > "$STATE_FILE"
 
-CURRENT_TF_BUCKET="$(grep -oP '(?<=bucket\s{7}= ")[^"]+' "$MAIN_TF" | head -1)"
+CURRENT_TF_BUCKET="$(grep -oP 'bucket\s+= "\K[^"]+' "$MAIN_TF" | head -1 || true)"
 if [ "$CURRENT_TF_BUCKET" != "$BUCKET" ]; then
-  echo "== Updating terraform/main.tf backend bucket: $CURRENT_TF_BUCKET -> $BUCKET =="
-  sed -i.bak "s/bucket         = \"${CURRENT_TF_BUCKET}\"/bucket         = \"${BUCKET}\"/" "$MAIN_TF"
+  echo "== Updating terraform/main.tf backend bucket: ${CURRENT_TF_BUCKET:-<none found>} -> $BUCKET =="
+  if [ -n "$CURRENT_TF_BUCKET" ]; then
+    sed -i.bak -E "s/(bucket[[:space:]]+= \")${CURRENT_TF_BUCKET}(\")/\1${BUCKET}\2/" "$MAIN_TF"
+  else
+    # Couldn't parse an existing value out of the backend block - replace
+    # the whole bucket line instead, whatever string it currently holds.
+    sed -i.bak -E "s/^([[:space:]]*bucket[[:space:]]+= \").*(\")\$/\1${BUCKET}\2/" "$MAIN_TF"
+  fi
   rm -f "${MAIN_TF}.bak"
 fi
 

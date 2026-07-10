@@ -18,7 +18,8 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------
-  # 1. Terraform: VPC, EKS, DynamoDB, ECR, ALB controller, IRSA roles
+  # 1. Terraform: VPC, EKS, 20 DynamoDB tables, 21 ECR repos, SNS topic,
+  #    ALB controller, IRSA roles
   # ---------------------------------------------------------------------
   terraform:
     runs-on: ubuntu-latest
@@ -26,8 +27,9 @@ jobs:
       run:
         working-directory: terraform
     outputs:
-      ecr_repository_url: ${{ steps.tf_out.outputs.ecr_repository_url }}
+      ecr_repository_urls: ${{ steps.tf_out.outputs.ecr_repository_urls }}
       backend_irsa_role_arn: ${{ steps.tf_out.outputs.backend_irsa_role_arn }}
+      sns_user_registered_topic_arn: ${{ steps.tf_out.outputs.sns_user_registered_topic_arn }}
     steps:
       - uses: actions/checkout@v4
 
@@ -54,11 +56,13 @@ jobs:
       - name: Capture outputs
         id: tf_out
         run: |
-          echo "ecr_repository_url=$(terraform output -raw ecr_repository_url)" >> "$GITHUB_OUTPUT"
+          echo "ecr_repository_urls=$(terraform output -json ecr_repository_urls | jq -c .)" >> "$GITHUB_OUTPUT"
           echo "backend_irsa_role_arn=$(terraform output -raw backend_irsa_role_arn)" >> "$GITHUB_OUTPUT"
+          echo "sns_user_registered_topic_arn=$(terraform output -raw sns_user_registered_topic_arn)" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------
-  # 2. Build + push image, deploy to EKS, surface the ingress URL
+  # 2. Build + push all 20 microservice images + frontend, deploy to EKS,
+  #    surface the single ingress URL
   # ---------------------------------------------------------------------
   deploy:
     needs: terraform
@@ -73,51 +77,83 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to ECR
-        id: ecr_login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push image
+      - name: Build and push all service images
         env:
-          ECR_URL: ${{ needs.terraform.outputs.ecr_repository_url }}
+          ECR_URLS_JSON: ${{ needs.terraform.outputs.ecr_repository_urls }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          cd backend
-          docker build -t "$ECR_URL:$IMAGE_TAG" -t "$ECR_URL:latest" .
-          docker push "$ECR_URL:$IMAGE_TAG"
-          docker push "$ECR_URL:latest"
+          echo "$ECR_URLS_JSON" | jq -r 'keys[]' | while read -r svc; do
+            url=$(echo "$ECR_URLS_JSON" | jq -r --arg s "$svc" '.[$s]')
+            if [ "$svc" = "frontend" ]; then
+              ctx="frontend"
+            else
+              ctx="backend"
+            fi
+            echo "== Building $svc from $ctx (Dockerfile: $( [ "$svc" = "frontend" ] && echo frontend/Dockerfile || echo backend/services/$svc/Dockerfile )) =="
+            if [ "$svc" = "frontend" ]; then
+              docker build -f frontend/Dockerfile -t "$url:$IMAGE_TAG" -t "$url:latest" frontend
+            else
+              docker build -f "backend/services/$svc/Dockerfile" -t "$url:$IMAGE_TAG" -t "$url:latest" backend
+            fi
+            docker push "$url:$IMAGE_TAG"
+            docker push "$url:latest"
+          done
 
       - name: Point kubectl at the cluster
         run: aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
 
       - name: Render manifests
         env:
-          ECR_URL: ${{ needs.terraform.outputs.ecr_repository_url }}
+          ECR_URLS_JSON: ${{ needs.terraform.outputs.ecr_repository_urls }}
           IMAGE_TAG: ${{ github.sha }}
           ROLE_ARN: ${{ needs.terraform.outputs.backend_irsa_role_arn }}
+          SNS_TOPIC_ARN: ${{ needs.terraform.outputs.sns_user_registered_topic_arn }}
         run: |
           mkdir -p rendered
+
           sed "s|arn:aws:iam::<ACCOUNT_ID>:role/veerabank-dev-backend-dynamodb|$ROLE_ARN|" \
             k8s/serviceaccount.yaml > rendered/serviceaccount.yaml
-          sed "s|<ECR_REPO_URL>:latest|$ECR_URL:$IMAGE_TAG|" \
-            k8s/deployment.yaml > rendered/deployment.yaml
-          cp k8s/namespace.yaml k8s/service.yaml k8s/ingress.yaml rendered/
+
+          cp k8s/namespace.yaml k8s/ingress.yaml rendered/
+
+          # 20 backend microservices
+          for f in k8s/services/*-deployment.yaml; do
+            svc=$(basename "$f" -deployment.yaml)
+            env_name=$(echo "$svc" | tr '[:lower:]-' '[:upper:]_')
+            url=$(echo "$ECR_URLS_JSON" | jq -r --arg s "$svc" '.[$s]')
+            sed "s|<ECR_REPO_URL_${env_name}>:latest|$url:$IMAGE_TAG|" "$f" \
+              | sed "s|<SNS_USER_REGISTERED_TOPIC_ARN>|$SNS_TOPIC_ARN|" \
+              > "rendered/${svc}-deployment.yaml"
+          done
+          cp k8s/services/*-service.yaml rendered/
+
+          # frontend
+          frontend_url=$(echo "$ECR_URLS_JSON" | jq -r '.frontend')
+          sed "s|<ECR_REPO_URL_FRONTEND>:latest|$frontend_url:$IMAGE_TAG|" \
+            k8s/frontend/deployment.yaml > rendered/frontend-deployment.yaml
+          cp k8s/frontend/service.yaml rendered/frontend-service.yaml
 
       - name: Apply manifests
         run: |
           kubectl apply -f rendered/namespace.yaml
           kubectl apply -f rendered/serviceaccount.yaml
-          kubectl apply -f rendered/deployment.yaml
-          kubectl apply -f rendered/service.yaml
-          kubectl apply -f rendered/ingress.yaml
+          kubectl apply -f rendered/
 
-      - name: Wait for rollout
-        run: kubectl rollout status deployment/backend -n ${{ env.NAMESPACE }} --timeout=180s
+      - name: Wait for rollouts
+        run: |
+          for f in rendered/*-deployment.yaml; do
+            name=$(grep -m1 "^  name:" "$f" | awk '{print $2}')
+            echo "Waiting for deployment/$name..."
+            kubectl rollout status "deployment/$name" -n ${{ env.NAMESPACE }} --timeout=180s || true
+          done
 
       - name: Wait for ALB and print the ingress URL
         run: |
           echo "Waiting for ALB hostname..."
           for i in $(seq 1 30); do
-            HOST=$(kubectl get ingress backend-ingress -n ${{ env.NAMESPACE }} \
+            HOST=$(kubectl get ingress veerabank-ingress -n ${{ env.NAMESPACE }} \
               -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
             if [ -n "$HOST" ]; then
               echo "http://$HOST" > ingress_url.txt
@@ -131,5 +167,6 @@ jobs:
           fi
           URL=$(cat ingress_url.txt)
           echo "### 🚀 Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
-          echo "INGRESS_URL=$URL" >> "$GITHUB_ENV"
+          echo "Frontend: $URL/" >> "$GITHUB_STEP_SUMMARY"
+          echo "Users API: $URL/users/register" >> "$GITHUB_STEP_SUMMARY"
           echo "$URL"

@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>VeeraBank</title>
+<style>
+  :root {
+    --bg: #0f172a; --card: #1e293b; --accent: #38bdf8;
+    --text: #e2e8f0; --muted: #94a3b8; --danger: #f87171; --ok: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 16px 24px; background: var(--card); display:flex; align-items:center; justify-content:space-between; }
+  header h1 { margin:0; font-size: 1.3rem; }
+  header h1 span { color: var(--accent); }
+  nav { display:flex; gap:8px; flex-wrap:wrap; padding: 12px 24px; background:#141c2f; }
+  nav button { background:none; border:1px solid #334155; color: var(--muted); padding:6px 12px; border-radius:6px; cursor:pointer; font-size:0.85rem; }
+  nav button.active, nav button:hover { border-color: var(--accent); color: var(--text); }
+  main { padding: 24px; max-width: 900px; margin: 0 auto; }
+  .card { background: var(--card); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+  .card h2 { margin-top:0; font-size:1.05rem; }
+  label { display:block; font-size:0.8rem; color: var(--muted); margin-top:10px; }
+  input, select { width:100%; padding:8px; border-radius:6px; border:1px solid #334155; background:#0f172a; color:var(--text); margin-top:4px; }
+  button.primary { margin-top:14px; background: var(--accent); color:#0f172a; border:none; padding:10px 16px; border-radius:6px; font-weight:600; cursor:pointer; }
+  .msg { margin-top:10px; font-size:0.85rem; }
+  .msg.ok { color: var(--ok); } .msg.err { color: var(--danger); }
+  table { width:100%; border-collapse: collapse; margin-top:10px; font-size:0.85rem; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #334155; }
+  .hidden { display:none; }
+  .pill { display:inline-block; background:#0f172a; border:1px solid #334155; padding:2px 8px; border-radius:20px; font-size:0.75rem; color:var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Veera<span>Bank</span></h1>
+  <span id="whoami" class="pill">not logged in</span>
+</header>
+
+<nav id="nav"></nav>
+
+<main id="main"></main>
+
+<script>
+// ---------------------------------------------------------------------
+// Config - each microservice is reached via its own ingress path prefix,
+// e.g. /accounts, /transactions, /users, /transfers, /cards, ...
+// ---------------------------------------------------------------------
+const GENERIC_SERVICES = [
+  "transfers","cards","loans","payments","beneficiaries","statements",
+  "notifications","kyc","fixed-deposits","cheques","disputes",
+  "audit-log","fraud-detection","support-tickets","rewards","admin","reports"
+];
+
+let currentUser = JSON.parse(localStorage.getItem("veera_user") || "null");
+let currentTab = "auth";
+
+function setUser(u) {
+  currentUser = u;
+  localStorage.setItem("veera_user", JSON.stringify(u));
+  document.getElementById("whoami").textContent = u ? `${u.full_name} (${u.email})` : "not logged in";
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || res.statusText);
+  return body;
+}
+
+function renderNav() {
+  const nav = document.getElementById("nav");
+  const tabs = [
+    ["auth", "Login / Register"],
+    ["accounts", "Accounts"],
+    ["transactions", "Transactions"],
+    ["services", "Other Services (17)"],
+  ];
+  nav.innerHTML = "";
+  tabs.forEach(([key, label]) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = key === currentTab ? "active" : "";
+    b.onclick = () => { currentTab = key; render(); };
+    nav.appendChild(b);
+  });
+}
+
+function msg(text, ok) {
+  return `<div class="msg ${ok ? 'ok' : 'err'}">${text}</div>`;
+}
+
+function renderAuth() {
+  document.getElementById("main").innerHTML = `
+    <div class="card">
+      <h2>Register</h2>
+      <label>Full name</label><input id="r_name" />
+      <label>Email</label><input id="r_email" type="email" />
+      <label>Phone</label><input id="r_phone" />
+      <label>Password</label><input id="r_password" type="password" />
+      <button class="primary" onclick="doRegister()">Create account</button>
+      <div id="r_msg"></div>
+    </div>
+    <div class="card">
+      <h2>Login</h2>
+      <label>Email</label><input id="l_email" type="email" />
+      <label>Password</label><input id="l_password" type="password" />
+      <button class="primary" onclick="doLogin()">Login</button>
+      <div id="l_msg"></div>
+    </div>
+  `;
+}
+
+async function doRegister() {
+  const el = document.getElementById("r_msg");
+  try {
+    const body = {
+      full_name: document.getElementById("r_name").value,
+      email: document.getElementById("r_email").value,
+      phone: document.getElementById("r_phone").value,
+      password: document.getElementById("r_password").value,
+    };
+    const user = await api("/users/register", { method: "POST", body: JSON.stringify(body) });
+    setUser(user);
+    el.innerHTML = msg("Registered! Welcome notification sent.", true);
+  } catch (e) { el.innerHTML = msg(e.message, false); }
+}
+
+async function doLogin() {
+  const el = document.getElementById("l_msg");
+  try {
+    const body = {
+      email: document.getElementById("l_email").value,
+      password: document.getElementById("l_password").value,
+    };
+    const user = await api("/users/login", { method: "POST", body: JSON.stringify(body) });
+    setUser(user);
+    el.innerHTML = msg("Logged in.", true);
+  } catch (e) { el.innerHTML = msg(e.message, false); }
+}
+
+function renderAccounts() {
+  document.getElementById("main").innerHTML = `
+    <div class="card">
+      <h2>Open account</h2>
+      <label>Owner name</label><input id="a_owner" value="${currentUser ? currentUser.full_name : ''}" />
+      <label>Type</label>
+      <select id="a_type"><option value="savings">savings</option><option value="current">current</option></select>
+      <label>Opening balance</label><input id="a_balance" type="number" value="0" />
+      <button class="primary" onclick="doCreateAccount()">Create</button>
+      <div id="a_msg"></div>
+    </div>
+    <div class="card">
+      <h2>All accounts</h2>
+      <button class="primary" onclick="loadAccounts()">Refresh</button>
+      <table id="a_table"><thead><tr><th>ID</th><th>Owner</th><th>Type</th><th>Balance</th></tr></thead><tbody></tbody></table>
+    </div>
+  `;
+  loadAccounts();
+}
+
+async function doCreateAccount() {
+  const el = document.getElementById("a_msg");
+  try {
+    const body = {
+      owner_name: document.getElementById("a_owner").value,
+      account_type: document.getElementById("a_type").value,
+      opening_balance: Number(document.getElementById("a_balance").value || 0),
+    };
+    await api("/accounts", { method: "POST", body: JSON.stringify(body) });
+    el.innerHTML = msg("Account created.", true);
+    loadAccounts();
+  } catch (e) { el.innerHTML = msg(e.message, false); }
+}
+
+async function loadAccounts() {
+  try {
+    const accounts = await api("/accounts");
+    const tbody = document.querySelector("#a_table tbody");
+    tbody.innerHTML = accounts.map(a => `<tr><td>${a.account_id.slice(0,8)}...</td><td>${a.owner_name}</td><td>${a.account_type}</td><td>${a.balance}</td></tr>`).join("");
+  } catch (e) { console.error(e); }
+}
+
+function renderTransactions() {
+  document.getElementById("main").innerHTML = `
+    <div class="card">
+      <h2>New transaction</h2>
+      <label>Account ID</label><input id="t_account" />
+      <label>Type</label>
+      <select id="t_type"><option value="deposit">deposit</option><option value="withdrawal">withdrawal</option></select>
+      <label>Amount</label><input id="t_amount" type="number" />
+      <button class="primary" onclick="doTransaction()">Submit</button>
+      <div id="t_msg"></div>
+    </div>
+    <div class="card">
+      <h2>History for an account</h2>
+      <label>Account ID</label><input id="t_lookup" />
+      <button class="primary" onclick="loadTransactions()">Load</button>
+      <table id="t_table"><thead><tr><th>Type</th><th>Amount</th><th>Balance after</th><th>When</th></tr></thead><tbody></tbody></table>
+    </div>
+  `;
+}
+
+async function doTransaction() {
+  const el = document.getElementById("t_msg");
+  try {
+    const body = {
+      account_id: document.getElementById("t_account").value,
+      type: document.getElementById("t_type").value,
+      amount: Number(document.getElementById("t_amount").value),
+    };
+    await api("/transactions", { method: "POST", body: JSON.stringify(body) });
+    el.innerHTML = msg("Transaction recorded.", true);
+  } catch (e) { el.innerHTML = msg(e.message, false); }
+}
+
+async function loadTransactions() {
+  try {
+    const id = document.getElementById("t_lookup").value;
+    const txns = await api(`/transactions/${id}`);
+    const tbody = document.querySelector("#t_table tbody");
+    tbody.innerHTML = txns.map(t => `<tr><td>${t.type}</td><td>${t.amount}</td><td>${t.balance_after}</td><td>${t.created_at}</td></tr>`).join("");
+  } catch (e) { console.error(e); }
+}
+
+function renderServices() {
+  document.getElementById("main").innerHTML = `
+    <div class="card">
+      <h2>Other services</h2>
+      <label>Pick a service</label>
+      <select id="s_service">${GENERIC_SERVICES.map(s => `<option value="${s}">${s}</option>`).join("")}</select>
+      <label>Item JSON (any shape)</label>
+      <input id="s_json" value='{"note": "example"}' />
+      <button class="primary" onclick="doCreateGeneric()">Create item</button>
+      <button onclick="loadGeneric()" style="margin-left:8px">List items</button>
+      <div id="s_msg"></div>
+      <table id="s_table"><thead><tr><th>ID</th><th>Data</th><th>Created</th></tr></thead><tbody></tbody></table>
+    </div>
+  `;
+}
+
+async function doCreateGeneric() {
+  const el = document.getElementById("s_msg");
+  const svc = document.getElementById("s_service").value;
+  try {
+    const data = JSON.parse(document.getElementById("s_json").value);
+    await api(`/${svc}/items`, { method: "POST", body: JSON.stringify(data) });
+    el.innerHTML = msg("Created.", true);
+    loadGeneric();
+  } catch (e) { el.innerHTML = msg(e.message, false); }
+}
+
+async function loadGeneric() {
+  const svc = document.getElementById("s_service").value;
+  try {
+    const items = await api(`/${svc}/items`);
+    const tbody = document.querySelector("#s_table tbody");
+    tbody.innerHTML = items.map(i => `<tr><td>${(i.id||'').slice(0,8)}</td><td>${JSON.stringify(i)}</td><td>${i.created_at||''}</td></tr>`).join("");
+  } catch (e) { console.error(e); }
+}
+
+function render() {
+  renderNav();
+  if (currentTab === "auth") renderAuth();
+  else if (currentTab === "accounts") renderAccounts();
+  else if (currentTab === "transactions") renderTransactions();
+  else if (currentTab === "services") renderServices();
+}
+
+setUser(currentUser);
+render();
+</script>
+</body>
+</html>

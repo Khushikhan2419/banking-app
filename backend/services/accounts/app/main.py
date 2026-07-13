@@ -217,12 +217,13 @@ def get_account_by_number(account_number: str):
     real sender would type in to send money to someone else, instead of
     the internal account_id (which is only ever shown to the account's
     own owner)."""
-    resp = accounts_table.scan(
-        FilterExpression="account_number = :n AND record_type = :t",
-        ExpressionAttributeValues={":n": account_number, ":t": RECORD_TYPE_ACCOUNT},
+    resp = accounts_table.query(
+        IndexName="account_number-index",
+        KeyConditionExpression="account_number = :n",
+        ExpressionAttributeValues={":n": account_number},
         Limit=1,
     )
-    items = resp.get("Items", [])
+    items = [i for i in resp.get("Items", []) if i.get("record_type") == RECORD_TYPE_ACCOUNT]
     if not items:
         raise HTTPException(status_code=404, detail="No account with that account number")
     return _to_account_model(items[0])

@@ -30,8 +30,13 @@ output "vpc_id" {
 }
 
 output "users_db_endpoint" {
-  description = "Aurora MySQL cluster endpoint (replica of the users DynamoDB table, fed by users-db-sync)"
+  description = "Aurora MySQL writer endpoint (replica of the users DynamoDB table, fed by users-db-sync)"
   value       = aws_rds_cluster.users.endpoint
+}
+
+output "users_db_reader_endpoint" {
+  description = "Aurora MySQL reader endpoint - load-balances across all reader instances (read-only queries only)"
+  value       = aws_rds_cluster.users.reader_endpoint
 }
 
 output "users_db_name" {

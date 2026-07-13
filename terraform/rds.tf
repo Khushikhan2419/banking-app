@@ -74,17 +74,37 @@ resource "aws_rds_cluster" "users" {
   skip_final_snapshot    = true
   backup_retention_period = 7
 
-  serverlessv2_scaling_configuration {
-    min_capacity = 0.5
-    max_capacity = 4
-  }
+  # NOTE: no serverlessv2_scaling_configuration here on purpose. This runs
+  # in the Pluralsight AWS sandbox, whose org-level SCP explicitly denies
+  # rds:CreateDBInstance for any class other than t3/t4g micro/small/medium
+  # (db.serverless gets a hard AccessDenied). So both instances below are
+  # regular provisioned t3 instances instead of Aurora Serverless v2.
 }
 
-resource "aws_rds_cluster_instance" "users" {
-  cluster_identifier = aws_rds_cluster.users.id
-  instance_class      = "db.serverless"
-  engine               = aws_rds_cluster.users.engine
-  engine_version       = aws_rds_cluster.users.engine_version
+# Writer instance - the cluster's primary. All INSERT/UPDATE/DELETE traffic
+# (from the users-db-sync Lambda) goes here, either directly via the
+# cluster endpoint or explicitly via aws_rds_cluster.users.endpoint.
+resource "aws_rds_cluster_instance" "writer" {
+  identifier          = "${var.project_name}-${var.environment}-users-db-writer"
+  cluster_identifier  = aws_rds_cluster.users.id
+  instance_class      = "db.t3.medium"
+  engine              = aws_rds_cluster.users.engine
+  engine_version      = aws_rds_cluster.users.engine_version
+  promotion_tier      = 0
+}
+
+# Reader instance - a second Aurora instance in the same cluster. Any
+# service that only needs to SELECT (e.g. reporting/joins off the RDS
+# replica) should point at aws_rds_cluster.users.reader_endpoint, which
+# load-balances across all non-writer instances - this one included. It
+# also gives the cluster automatic failover if the writer instance fails.
+resource "aws_rds_cluster_instance" "reader" {
+  identifier          = "${var.project_name}-${var.environment}-users-db-reader"
+  cluster_identifier  = aws_rds_cluster.users.id
+  instance_class      = "db.t3.medium"
+  engine              = aws_rds_cluster.users.engine
+  engine_version      = aws_rds_cluster.users.engine_version
+  promotion_tier      = 1
 }
 
 # Credentials handed to the users-db-sync Lambda via a private S3 bucket
@@ -122,17 +142,23 @@ locals {
 }
 
 resource "aws_s3_object" "users_db_creds" {
-  bucket                  = aws_s3_bucket.users_db_creds.id
-  key                     = local.users_db_creds_key
-  server_side_encryption  = "AES256"
-  content_type            = "application/json"
+  bucket                 = aws_s3_bucket.users_db_creds.id
+  key                    = local.users_db_creds_key
+  server_side_encryption = "AES256"
+  content_type           = "application/json"
   content = jsonencode({
-    username = aws_rds_cluster.users.master_username
-    password = random_password.db_master.result
-    host     = aws_rds_cluster.users.endpoint
-    port     = 3306
-    dbname   = aws_rds_cluster.users.database_name
+    username    = aws_rds_cluster.users.master_username
+    password    = random_password.db_master.result
+    # Writes (the users-db-sync Lambda) go to the cluster/writer endpoint.
+    host        = aws_rds_cluster.users.endpoint
+    # Read-only callers should use this instead - it load-balances across
+    # every reader instance in the cluster (aws_rds_cluster_instance.reader).
+    reader_host = aws_rds_cluster.users.reader_endpoint
+    port        = 3306
+    dbname      = aws_rds_cluster.users.database_name
   })
+
+  depends_on = [aws_rds_cluster_instance.writer, aws_rds_cluster_instance.reader]
 }
 
 resource "aws_iam_policy" "users_db_secret_access" {

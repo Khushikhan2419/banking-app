@@ -54,6 +54,13 @@ jobs:
         run: terraform init
 
       - name: Terraform Apply
+        env:
+          # Set these as repo secrets (Settings -> Secrets and variables ->
+          # Actions). Both are optional: if either is blank, that piece
+          # (ops SNS email alert / per-user SES welcome email) is skipped
+          # by terraform, but nothing fails.
+          TF_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL }}
+          TF_VAR_ses_sender_email: ${{ secrets.SES_SENDER_EMAIL }}
         run: terraform apply -auto-approve
 
       - name: Capture outputs
@@ -109,6 +116,29 @@ jobs:
 
       - name: Point kubectl at the cluster
         run: aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Wait for AWS Load Balancer Controller webhook
+        run: |
+          # Terraform's helm_release for the ALB controller can report
+          # "deployed" a little before the pod is actually Ready and its
+          # mutating/validating webhook has live endpoints. Applying any
+          # Service/Ingress manifest before that happens fails with
+          # "no endpoints available for service aws-load-balancer-webhook-service".
+          # So wait here, with retries, before touching any manifests.
+          echo "Waiting for aws-load-balancer-controller rollout..."
+          kubectl -n kube-system rollout status deployment/aws-load-balancer-controller --timeout=180s
+
+          echo "Waiting for aws-load-balancer-webhook-service to have live endpoints..."
+          for i in $(seq 1 30); do
+            EP=$(kubectl -n kube-system get endpoints aws-load-balancer-webhook-service \
+              -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
+            if [ -n "$EP" ]; then
+              echo "Webhook endpoints ready: $EP"
+              break
+            fi
+            echo "Not ready yet ($i/30), retrying in 10s..."
+            sleep 10
+          done
 
       - name: Render manifests
         env:

@@ -27,6 +27,8 @@ spec:
               value: "us-east-1"
             - name: TABLE_PREFIX
               value: "veerabank-dev"
+            - name: USERS_SERVICE_URL
+              value: "http://users-svc.veerabank.svc.cluster.local"
           resources:
             requests:
               cpu: "50m"

@@ -19,9 +19,24 @@ resource "aws_dynamodb_table" "accounts" {
     type = "S"
   }
 
+  # Public account number a sender types in to transfer money to someone
+  # else (see GET /accounts/by-number/{account_number} in
+  # backend/services/accounts). Indexed so that lookup is a direct Query
+  # instead of a table Scan.
+  attribute {
+    name = "account_number"
+    type = "S"
+  }
+
   global_secondary_index {
     name            = "user_id-index"
     hash_key        = "user_id"
+    projection_type = "ALL"
+  }
+
+  global_secondary_index {
+    name            = "account_number-index"
+    hash_key        = "account_number"
     projection_type = "ALL"
   }
 

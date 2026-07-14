@@ -33,6 +33,12 @@ button{font-family:inherit;}
   background:linear-gradient(180deg, var(--panel), var(--ink) 140%);
   border-right:1px solid var(--line);
   padding:28px 20px; display:flex; flex-direction:column; gap:28px;
+  box-shadow:6px 0 30px rgba(0,0,0,.25);
+  position:relative; z-index:5;
+}
+.sidebar::after{
+  content:""; position:absolute; top:0; right:-1px; width:1px; height:100%;
+  background:linear-gradient(180deg, transparent, rgba(31,157,108,.35), transparent);
 }
 .brand{display:flex; align-items:center; gap:10px;}
 .brand .mark{
@@ -65,7 +71,9 @@ button{font-family:inherit;}
 .signout:hover{color:var(--danger);}
 
 /* ---------- Main ---------- */
-main{padding:30px 40px 60px; max-width:1180px; width:100%; margin:0 auto;}
+main{padding:30px 40px 60px; max-width:1180px; width:100%; margin:0 auto; transition:background .25s ease;}
+main.themed{ animation:themeIn .3s ease both; }
+@keyframes themeIn{ from{opacity:0;} to{opacity:1;} }
 @media (max-width:640px){ main{padding:20px;} }
 
 .topline{display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:26px;}

@@ -4,7 +4,7 @@ let revealedCards = {}; // cardId -> { card_number, cvv } once fetched, kept onl
 async function renderCards() {
   const main = document.getElementById("main");
   const mine = await myAccountOrNull();
-  main.innerHTML = pageHeader("Cards", "Debit & credit cards") + (mine ? `
+  main.innerHTML = pageHeader("Cards", "Debit & credit cards") + `<div class="cd-strip">▭ NEON VAULT · VIRTUAL CARD WALL</div>` + (mine ? `
     <div class="grid cols-2">
       <div class="card fade-in">
         <h2>Issue a new card</h2>

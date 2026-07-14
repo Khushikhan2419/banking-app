@@ -54,7 +54,7 @@ function renderNav() {
   secondary.innerHTML = `<div class="label">Services</div>`;
   const b = document.createElement("button");
   b.className = "navitem" + (currentTab === "services" ? " active" : "");
-  b.innerHTML = `${iconFor("services")}<span>All services (16)</span>`;
+  b.innerHTML = `${iconFor("services")}<span>All services (${GENERIC_SERVICES.length})</span>`;
   b.onclick = () => { currentTab = "services"; render(); };
   secondary.appendChild(b);
 }
@@ -81,6 +81,10 @@ setInterval(tickClock, 1000);
 async function render() {
   if (!currentUser) { renderGate(); return; }
   renderShell();
+  // Every tab/service renders inside #main wearing its own theme class —
+  // this is the single hook that gives each "server" page its completely
+  // separate look (colors, type, shapes) without touching page logic.
+  document.getElementById("main").className = "themed theme-" + currentTab;
   if (currentTab === "dashboard") await renderDashboard();
   else if (currentTab === "accounts") await renderAccounts();
   else if (currentTab === "transfers") await renderTransfers();
@@ -88,4 +92,42 @@ async function render() {
   else if (currentTab === "services") renderServices();
   else if (SERVICE_PAGES[currentTab]) await SERVICE_PAGES[currentTab]();
   tickClock();
+}
+
+/* ---------------------------------------------------------------------- */
+/* Full-screen "View" overlay — lets someone preview a service's theme and
+   live headline stat at big-screen size before committing to open it. */
+async function openBigView(key) {
+  const label = (key || "").replace(/-/g, " ");
+  const wrap = document.createElement("div");
+  wrap.className = "bigview-backdrop theme-" + key;
+  wrap.id = "bigview-backdrop";
+  wrap.onclick = (e) => { if (e.target === wrap) closeBigView(); };
+  wrap.innerHTML = `
+    <div class="bigview fade-in">
+      <button class="bigview-close" onclick="closeBigView()">✕</button>
+      <div class="bigview-eyebrow">${iconFor("services")} VeeraBank · microservice preview</div>
+      <div class="bigview-title">${label}</div>
+      <div class="bigview-icon">${SERVICE_ICONS[key] || "◆"}</div>
+      <div class="bigview-stat" id="bigview-stat">Loading preview…</div>
+      <p class="bigview-desc">${SERVICE_BLURBS[key] || "Open this service to see live data."}</p>
+      <button class="btn bigview-open" onclick="closeBigView(); currentTab='${key}'; render();">Open ${label} →</button>
+    </div>
+  `;
+  document.body.appendChild(wrap);
+  document.addEventListener("keydown", bigViewEsc);
+  try {
+    const stat = await SERVICE_PREVIEW[key]?.();
+    const el = document.getElementById("bigview-stat");
+    if (el) el.textContent = stat || "Ready.";
+  } catch (e) {
+    const el = document.getElementById("bigview-stat");
+    if (el) el.textContent = "Sign in required to preview live data.";
+  }
+}
+function bigViewEsc(e){ if (e.key === "Escape") closeBigView(); }
+function closeBigView() {
+  const el = document.getElementById("bigview-backdrop");
+  if (el) el.remove();
+  document.removeEventListener("keydown", bigViewEsc);
 }

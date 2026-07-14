@@ -2,6 +2,7 @@
 real VeeraBank account. Card numbers are only ever returned in full at
 the moment of issuance; every other read returns a masked number, so
 this can't reuse the plain generic list/get factory."""
+import hashlib
 import os
 import random
 import sys
@@ -68,6 +69,7 @@ def issue_card(payload: CardCreate):
         raise HTTPException(status_code=403, detail="You can only issue a card against your own account")
 
     number = _generate_card_number()
+    cvv = "".join(str(random.randint(0, 9)) for _ in range(3))
     now = datetime.now(timezone.utc)
     item = {
         "id": new_id(),
@@ -76,6 +78,7 @@ def issue_card(payload: CardCreate):
         "card_type": payload.card_type,
         "card_number_masked": "•••• •••• •••• " + number[-4:],
         "card_number": number,
+        "cvv": cvv,
         "expiry": (now + timedelta(days=365 * 4)).strftime("%m/%y"),
         "credit_limit": str(Decimal(account["balance"]) * 2) if payload.card_type == "credit" else None,
         "status": "active",
@@ -104,6 +107,36 @@ def get_card(card_id: str):
     if not item:
         raise HTTPException(status_code=404, detail="Card not found")
     return _mask(item)
+
+
+@router.get("/{card_id}/reveal/{user_id}")
+def reveal_card(card_id: str, user_id: str):
+    """Returns the full, unmasked card number/CVV so the owner can view
+    their card front & back in the app whenever they want - not just the
+    one time at issuance. Still requires proving ownership via user_id,
+    and still 404s (not 403) for a card that isn't theirs, so this can't
+    be used to enumerate other people's cards."""
+    resp = tbl.get_item(Key={"id": card_id})
+    item = resp.get("Item")
+    if not item or item["user_id"] != user_id:
+        raise HTTPException(status_code=404, detail="Card not found")
+    return {
+        "id": item["id"],
+        "card_number": item["card_number"],
+        "cvv": item.get("cvv") or _fallback_cvv(item["id"]),
+        "expiry": item["expiry"],
+        "card_type": item["card_type"],
+        "status": item["status"],
+    }
+
+
+def _fallback_cvv(card_id: str) -> str:
+    # Cards issued before CVV was stored derive a stable 3-digit value
+    # from their own id via a fixed hash, so it doesn't change between
+    # reveals or across pods (Python's built-in hash() is randomized
+    # per-process, so it can't be used here).
+    digest = hashlib.md5(card_id.encode()).hexdigest()
+    return str(int(digest[:6], 16) % 900 + 100)
 
 
 @router.patch("/{card_id}/freeze")

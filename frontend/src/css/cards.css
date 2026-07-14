@@ -1,0 +1,75 @@
+.card-wall{display:flex; gap:22px; flex-wrap:wrap; margin-bottom:8px;}
+
+.vcard-scene{width:340px; max-width:100%; height:214px; perspective:1400px;}
+.vcard{
+  position:relative; width:100%; height:100%; cursor:pointer;
+  transform-style:preserve-3d; transition:transform .6s cubic-bezier(.2,.8,.2,1);
+}
+.vcard.flipped{transform:rotateY(180deg);}
+.vcard-face{
+  position:absolute; inset:0; border-radius:16px; backface-visibility:hidden;
+  padding:20px 22px; display:flex; flex-direction:column; justify-content:space-between;
+  box-shadow:0 18px 40px rgba(0,0,0,.45), inset 0 1px 0 rgba(255,255,255,.06);
+  overflow:hidden;
+}
+.vcard-face.front{
+  background:
+    radial-gradient(420px 200px at 100% 0%, rgba(201,162,75,.28), transparent 60%),
+    radial-gradient(320px 220px at 0% 100%, rgba(31,157,108,.22), transparent 60%),
+    linear-gradient(155deg, #16223c, #0a1120 75%);
+  color:#eef1f8;
+}
+.vcard-face.front.credit{
+  background:
+    radial-gradient(420px 200px at 100% 0%, rgba(31,157,108,.3), transparent 60%),
+    radial-gradient(320px 220px at 0% 100%, rgba(201,162,75,.22), transparent 60%),
+    linear-gradient(155deg, #1c1710, #0a1120 75%);
+}
+.vcard-face.back{
+  background:linear-gradient(155deg, #16223c, #0a1120 75%); color:#eef1f8; transform:rotateY(180deg);
+}
+.vcard-face::after{
+  content:""; position:absolute; inset:0; opacity:.05; pointer-events:none;
+  background-image:repeating-linear-gradient(115deg, #fff 0 1px, transparent 1px 26px);
+}
+
+.vcard-top{display:flex; justify-content:space-between; align-items:flex-start;}
+.vcard-bank{font-family:var(--display); font-size:15px; letter-spacing:.3px;}
+.vcard-bank b{color:var(--ledger);}
+.vcard-type{font-size:9.5px; letter-spacing:1.4px; text-transform:uppercase; color:var(--gold); border:1px solid rgba(201,162,75,.5); padding:3px 8px; border-radius:5px;}
+
+.vcard-chip{
+  width:38px; height:29px; border-radius:6px; margin-top:6px;
+  background:linear-gradient(155deg, #e8d48a, #b8973f);
+  position:relative;
+}
+.vcard-chip::before, .vcard-chip::after{content:""; position:absolute; background:rgba(0,0,0,.25); left:6px; right:6px; height:1px;}
+.vcard-chip::before{top:9px;} .vcard-chip::after{top:19px;}
+
+.vcard-number{font-family:var(--mono); font-size:19px; letter-spacing:2.5px; margin-top:10px; display:flex; align-items:center; gap:10px;}
+.vcard-reveal-btn{
+  background:none; border:1px solid var(--line); color:var(--muted); border-radius:6px;
+  width:26px; height:26px; font-size:12px; cursor:pointer; flex:none; display:flex; align-items:center; justify-content:center;
+}
+.vcard-reveal-btn:hover{color:var(--ledger); border-color:var(--ledger);}
+
+.vcard-bottom{display:flex; justify-content:space-between; align-items:flex-end;}
+.vcard-holder{font-size:9px; letter-spacing:.8px; text-transform:uppercase; color:var(--muted-2);}
+.vcard-holder .name{font-size:13px; color:#eef1f8; letter-spacing:.6px; margin-top:3px; text-transform:none; font-family:var(--sans); font-weight:600;}
+.vcard-expiry{font-size:9px; letter-spacing:.8px; text-transform:uppercase; color:var(--muted-2); text-align:right;}
+.vcard-expiry .val{font-family:var(--mono); font-size:13px; color:#eef1f8; margin-top:3px;}
+.vcard-network{font-family:var(--display); font-style:italic; font-size:20px; color:var(--muted);}
+
+.vcard-stripe{height:38px; background:#0a0a0a; margin:14px -22px 0;}
+.vcard-cvv-strip{display:flex; justify-content:flex-end; align-items:center; margin-top:14px; gap:10px;}
+.vcard-cvv-panel{background:#f4f1ea; color:#1a1a1a; border-radius:5px; padding:8px 14px; font-family:var(--mono); font-size:13px; letter-spacing:2px; min-width:60px; text-align:right;}
+.vcard-cvv-label{font-size:9px; letter-spacing:.8px; text-transform:uppercase; color:var(--muted-2);}
+.vcard-back-note{margin-top:16px; font-size:9.5px; color:var(--muted-2); line-height:1.5;}
+
+.vcard-status-flag{
+  position:absolute; top:14px; right:14px; font-size:9px; letter-spacing:1px; text-transform:uppercase;
+  background:rgba(232,105,95,.15); color:#f6a19b; border:1px solid rgba(232,105,95,.4); padding:3px 8px; border-radius:5px;
+}
+.vcard-scene.frozen .vcard-face{filter:grayscale(.6) brightness(.75);}
+
+.vcard-meta-row{display:flex; justify-content:space-between; align-items:center; margin-top:12px; gap:8px;}

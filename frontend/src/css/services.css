@@ -1,0 +1,12 @@
+.svc-tile{
+  text-align:left; cursor:pointer; border:1px solid var(--line); transition:border-color .15s, transform .1s;
+}
+.svc-tile:hover{border-color:var(--gold);}
+.svc-tile:active{transform:translateY(1px);}
+.svc-tile .icon{font-size:20px; color:var(--gold);}
+.svc-tile h2{text-transform:capitalize; margin-top:10px;}
+.svc-tile p{margin:0;}
+
+.stat-tile{padding:16px 18px;}
+.stat-tile .label{font-size:11px; color:var(--muted-2); letter-spacing:.4px;}
+.stat-tile .value{font-family:var(--mono); font-size:20px; margin-top:4px;}

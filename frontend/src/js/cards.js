@@ -55,7 +55,7 @@ function cardFacesHtml(c, idPrefix) {
     <div class="vcard-face front ${c.card_type}">
       ${frozen ? `<div class="vcard-status-flag">Frozen</div>` : ""}
       <div class="vcard-top">
-        <div class="vcard-bank">Veera<b>Bank</b></div>
+        <div class="vcard-bank">Cloud<b>Bank</b></div>
         <div class="vcard-type">${c.card_type}</div>
       </div>
       <div class="vcard-chip"></div>
@@ -76,10 +76,10 @@ function cardFacesHtml(c, idPrefix) {
           <div class="vcard-cvv-panel">${cvv}</div>
         </div>
       </div>
-      <div class="vcard-back-note">This card is issued by VeeraBank and is property of the account holder above. Tap the front to flip back. For lost/stolen cards, freeze it instantly from the app.</div>
+      <div class="vcard-back-note">This card is issued by Cloud Bank and is property of the account holder above. Tap the front to flip back. For lost/stolen cards, freeze it instantly from the app.</div>
       <div class="vcard-bottom" style="margin-top:14px;">
         <div class="vcard-holder"><div>Card number</div><div class="name" style="font-family:var(--mono); letter-spacing:1px;">${number}</div></div>
-        <div class="vcard-network">VB</div>
+        <div class="vcard-network">CB</div>
       </div>
     </div>
   `;

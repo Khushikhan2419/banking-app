@@ -49,9 +49,31 @@ async function renderPayments() {
       <div class="card fade-in">
         <h2>Pay a bill</h2>
         <p class="hint">Balance $${fmtMoney(mine.balance)}</p>
+        <label>Quick services</label>
+        <div class="amount-quickpicks" id="pm_service_picks">
+          <button type="button" data-category="mobile_recharge" onclick="pickPaymentService(this,'mobile_recharge','Mobile Recharge')">Mobile Recharge</button>
+          <button type="button" data-category="phone_recharge" onclick="pickPaymentService(this,'phone_recharge','Phone Recharge')">Phone Recharge</button>
+          <button type="button" data-category="dth" onclick="pickPaymentService(this,'dth','DTH / Cable')">DTH / Cable</button>
+          <button type="button" data-category="electricity" onclick="pickPaymentService(this,'electricity','Electricity Board')">Electricity</button>
+          <button type="button" data-category="water" onclick="pickPaymentService(this,'water','Water Utility')">Water</button>
+          <button type="button" data-category="broadband" onclick="pickPaymentService(this,'broadband','Broadband / Wifi')">Broadband</button>
+          <button type="button" data-category="insurance" onclick="pickPaymentService(this,'insurance','Insurance')">Insurance</button>
+          <button type="button" data-category="other" onclick="pickPaymentService(this,'other','')">More services</button>
+        </div>
         <label>Payee</label><input id="pm_payee" placeholder="Acme Electric" />
         <label>Category</label>
-        <select id="pm_category"><option value="utility">Utility</option><option value="phone">Phone</option><option value="credit_card">Credit card</option><option value="other">Other</option></select>
+        <select id="pm_category">
+          <option value="mobile_recharge">Mobile recharge</option>
+          <option value="phone_recharge">Phone recharge</option>
+          <option value="dth">DTH / Cable</option>
+          <option value="utility">Utility</option>
+          <option value="electricity">Electricity</option>
+          <option value="water">Water</option>
+          <option value="broadband">Broadband / Wifi</option>
+          <option value="insurance">Insurance</option>
+          <option value="credit_card">Credit card</option>
+          <option value="other">Other</option>
+        </select>
         <label>Amount</label><input id="pm_amount" type="number" min="0.01" step="0.01" placeholder="0.00" />
         <button class="btn" onclick="doPay()">Pay</button>
         <div id="pm_msg"></div>
@@ -60,6 +82,12 @@ async function renderPayments() {
     </div>
   ` : noAccountCard("payments"));
   if (mine) loadPayments();
+}
+function pickPaymentService(btn, category, payeeHint) {
+  document.querySelectorAll("#pm_service_picks button").forEach(b => b.classList.toggle("active", b === btn));
+  document.getElementById("pm_category").value = category;
+  if (payeeHint) document.getElementById("pm_payee").value = payeeHint;
+  document.getElementById("pm_amount").focus();
 }
 async function doPay() {
   const el = document.getElementById("pm_msg");
@@ -88,7 +116,7 @@ async function renderBeneficiaries() {
     <div class="grid cols-2">
       <div class="card fade-in">
         <h2>Add a beneficiary</h2>
-        <p class="hint">Verified against a real VeeraBank account number.</p>
+        <p class="hint">Verified against a real Cloud Bank account number.</p>
         <label>Account number</label><input id="bn_number" placeholder="e.g. 48219047335" />
         <label>Nickname (optional)</label><input id="bn_nickname" placeholder="Mom, Landlord, ..." />
         <button class="btn" onclick="doAddBeneficiary()">Add</button>
@@ -122,30 +150,50 @@ async function doRemoveBeneficiary(id) {
   catch (e) { toast(e.message, false); }
 }
 
-/* ---------------- Statements ---------------- */
+/* ---------------- Statements ----------------
+   Selecting your account is mandatory here: with no account there is
+   nothing to run a statement against, so noAccountCard blocks the whole
+   page (no partial/disabled form). Once you have an account, pick a
+   quick time range instead of typing dates - "Today", "1 hr before",
+   or "30 min before" (relative to right now). */
+let stRange = "today";
 async function renderStatements() {
   const main = document.getElementById("main");
   const mine = await myAccountOrNull();
   main.innerHTML = pageHeader("Statements", "Your account activity") + (mine ? `
     <div class="card fade-in">
       <h2>Statement for ${mine.account_number}</h2>
-      <div class="split" style="gap:10px;">
-        <div><label>From</label><input id="st_from" type="date" /></div>
-        <div><label>To</label><input id="st_to" type="date" /></div>
-        <button class="btn" onclick="loadStatement()" style="align-self:flex-end;">Run</button>
+      <label>Time range</label>
+      <div class="amount-quickpicks" id="st_range_picks">
+        <button type="button" class="active" data-range="today" onclick="pickStatementRange('today')">Today</button>
+        <button type="button" data-range="1h" onclick="pickStatementRange('1h')">1 hr before</button>
+        <button type="button" data-range="30m" onclick="pickStatementRange('30m')">30 min before</button>
       </div>
       <div id="st_summary" style="margin:14px 0;"></div>
       <div id="st_list"><div class="empty">Loading…</div></div>
     </div>
   ` : noAccountCard("statements"));
-  if (mine) loadStatement();
+  if (mine) { stRange = "today"; loadStatement(); }
+}
+function pickStatementRange(r) {
+  stRange = r;
+  document.querySelectorAll("#st_range_picks button").forEach(b => b.classList.toggle("active", b.dataset.range === r));
+  loadStatement();
+}
+function statementRangeBounds(r) {
+  const now = new Date();
+  let from;
+  if (r === "1h") from = new Date(now.getTime() - 60 * 60 * 1000);
+  else if (r === "30m") from = new Date(now.getTime() - 30 * 60 * 1000);
+  else from = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // start of today
+  return { from: from.toISOString(), to: now.toISOString() };
 }
 async function loadStatement() {
   const mine = cachedAccounts[0];
   const box = document.getElementById("st_list"), sum = document.getElementById("st_summary");
   try {
-    const from = document.getElementById("st_from").value, to = document.getElementById("st_to").value;
-    const q = new URLSearchParams(); if (from) q.set("from_date", from); if (to) q.set("to_date", to);
+    const { from, to } = statementRangeBounds(stRange);
+    const q = new URLSearchParams({ from_ts: from, to_ts: to });
     const s = await api(`/statements/${mine.account_id}?${q}`);
     sum.innerHTML = `<div class="split" style="gap:20px;">
       <div><div style="font-size:11px; color:var(--muted-2);">CREDITS</div><div class="amt pos" style="font-family:var(--mono);">+$${fmtMoney(s.total_credits)}</div></div>
@@ -271,7 +319,7 @@ async function renderCheques() {
         <h2>Issue a cheque</h2>
         <p class="hint">Funds only leave your account once it's cleared.</p>
         <label>Payee name</label><input id="ch_payee" placeholder="Payee name" />
-        <label>Payee's account number (optional)</label><input id="ch_payee_account" placeholder="e.g. 48219047335 — leave blank if they're not a VeeraBank customer" />
+        <label>Payee's account number (optional)</label><input id="ch_payee_account" placeholder="e.g. 48219047335 — leave blank if they're not a Cloud Bank customer" />
         <label>Amount</label><input id="ch_amount" type="number" min="0.01" step="0.01" placeholder="0.00" />
         <button class="btn" onclick="doIssueCheque()">Issue</button>
         <div id="ch_msg"></div>
@@ -535,7 +583,7 @@ const SERVICE_PAGES = {
 };
 function renderServices() {
   const main = document.getElementById("main");
-  main.innerHTML = pageHeader("Services", "Every VeeraBank feature") + `
+  main.innerHTML = pageHeader("Services", "Every Cloud Bank feature") + `
     <div class="grid cols-3">
       ${GENERIC_SERVICES.map(s => `
         <button class="card fade-in svc-tile" onclick="currentTab='${s}'; render();">

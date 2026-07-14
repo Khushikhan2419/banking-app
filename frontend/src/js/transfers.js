@@ -63,10 +63,13 @@ async function loadTransferHistory() {
     const rows = await api(`/transfers/account/${mine.account_id}`);
     box.innerHTML = rows.length ? rows.map(t => {
       const out = t.from_account_id === mine.account_id;
+      const fromLine = !out && (t.from_user_name || t.from_user_email)
+        ? `<div class="when">From ${t.from_user_name || "Unknown"}${t.from_user_email ? " · " + t.from_user_email : ""}</div>` : "";
       return `
         <div class="split" style="justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--line);">
           <div>
             <div style="font-size:13px; font-weight:600;">${out ? "Sent" : "Received"}${t.note ? " · " + t.note : ""}</div>
+            ${fromLine}
             <div class="when">${fmtWhen(t.created_at)}</div>
           </div>
           <div class="amt ${out ? 'neg' : 'pos'}" style="font-family:var(--mono);">${out ? '−' : '+'}$${fmtMoney(t.amount)}</div>

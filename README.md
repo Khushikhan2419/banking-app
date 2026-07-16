@@ -1,6 +1,6 @@
-# VeeraBank on EKS
+# Cloud Bank on EKS
 
-AWS banking app: Terraform-provisioned infra, **20 FastAPI microservices +
+AWS banking app: Terraform-provisioned infra, **21 FastAPI microservices +
 1 frontend**, deployed to EKS via ECR images + a single ALB Ingress.
 
 - **User accounts**: **DynamoDB** is the source of truth for registration/
@@ -8,6 +8,18 @@ AWS banking app: Terraform-provisioned infra, **20 FastAPI microservices +
   Lambda into an **Aurora MySQL (Serverless v2)** replica, so the same data
   can also be queried/joined relationally — the users-service pod itself
   never talks to RDS directly.
+- **Email verification (OTP) + login alerts**: registration is gated on a
+  6-digit code emailed to the person via Gmail SMTP (`users-service`
+  `/users/otp/send` + `/users/otp/verify`, backed by a short-lived
+  `otp_codes` DynamoDB table with TTL). Every successful login also fires
+  a "new sign-in to your account" email to that person's own address.
+  Credentials (`SMTP_USER`, `SMTP_APP_PASSWORD`) live only as a GitHub
+  Actions secret + a k8s Secret populated at deploy time — never in the repo.
+- **Support chatbot**: a stateless `chatbot-service` wraps Groq's chat-
+  completions API (`GROQ_API_KEY`, same secret-handling as SMTP above) and
+  answers questions about the app from a floating widget in the frontend.
+- **Profile self-service**: `PATCH /users/{id}` lets a person update only
+  their display name and avatar photo — email/phone/password are untouched.
 - **Per-user activity history** lives in **S3**, one folder per user
   (`s3://<bucket>/<user_id>/...`), written and read through a Lambda behind
   API Gateway. Any service can log an event there (transactions, account
@@ -31,7 +43,8 @@ AWS banking app: Terraform-provisioned infra, **20 FastAPI microservices +
   recipient, and writes the ledger row, all-or-nothing, with the balance
   check enforced inside the transaction itself (no possible overdraft
   race). It has its own DynamoDB table with GSIs so either party can
-  pull their transfer history.
+  pull their transfer history. Every transfer also carries the sender's
+  name and email, so the recipient always knows who paid them.
 - Everything else (cards, loans, payments, ...) still uses one simple
   DynamoDB table per service.
 
@@ -43,10 +56,10 @@ veerabank-eks/
 │   ├── lambda.tf             # user-history Lambda+API GW, notification-writer, users-db-sync
 │   ├── ses.tf                # SES sender identity for welcome emails
 │   ├── sns.tf                # user-registered topic: email sub + SQS/Lambda sub
-│   ├── dynamodb.tf           # users table (streams-enabled) + accounts table + 17 generic tables
+│   ├── dynamodb.tf           # users table (streams-enabled) + accounts + transfers + otp_codes + 16 generic tables
 │   └── vpc.tf eks.tf ecr.tf variables.tf outputs.tf main.tf
 ├── backend/
-│   ├── common/                # shared DynamoDB, SNS, and S3 helpers
+│   ├── common/                # shared DynamoDB, SNS, S3, and SMTP-mailer helpers
 │   ├── lambdas/
 │   │   ├── transactions_history/  # general-purpose per-user S3 history, behind API Gateway
 │   │   ├── notification_writer/   # SQS -> DynamoDB notifications table + SES welcome email
@@ -54,7 +67,8 @@ veerabank-eks/
 │   └── services/
 │       ├── accounts/          # account CRUD + balance (DynamoDB)
 │       ├── transactions/      # atomic balance update (DynamoDB) + history (S3 via Lambda)
-│       ├── users/             # register + login against DynamoDB, SNS publish + history event
+│       ├── users/             # register (OTP-gated) + login + profile update, SNS publish + history event
+│       ├── chatbot/           # stateless Groq chat-completions wrapper for the support widget
 │       ├── transfers/ cards/ loans/ payments/ beneficiaries/
 │       ├── statements/ notifications/ kyc/ fixed-deposits/ cheques/
 │       ├── disputes/ audit-log/ fraud-detection/ support-tickets/
@@ -63,7 +77,8 @@ veerabank-eks/
 └── k8s/
     ├── services/               # deployment + service manifest per microservice
     ├── frontend/               # frontend deployment + service
-    ├── ingress.yaml            # path-based routing: /accounts, /users, /transfers, ... , / -> frontend
+    ├── app-secrets.example.yaml # shape of the app-secrets Secret (SMTP + Groq) - reference only, never fill in and apply for real
+    ├── ingress.yaml            # path-based routing: /accounts, /users, /transfers, /chatbot, ... , / -> frontend
     ├── namespace.yaml
     └── serviceaccount.yaml     # one shared IRSA-linked service account for all backend pods
 ```
@@ -105,13 +120,14 @@ terraform apply
 This creates:
 - VPC (reused if one already exists — see `vpc.tf`)
 - EKS cluster (1.30) with a managed node group
-- 20 DynamoDB tables (`accounts`, `transactions`, `users` with custom
-  schemas; the other 17 are generic id-keyed tables)
-- 21 ECR repos (20 microservices + frontend)
+- 21 DynamoDB tables (`accounts`, `transactions`, `users`, `transfers` with
+  custom schemas; `otp_codes` for email-verification codes, TTL-expiring;
+  the other 16 are generic id-keyed tables)
+- 22 ECR repos (21 microservices, including `chatbot`, + frontend)
 - An SNS topic (`user-registered`) the `users` service publishes to on
   first-time registration
 - AWS Load Balancer Controller + EBS CSI driver, each with their own IRSA role
-- One shared IRSA role for all backend pods, scoped to all 20 tables + SNS publish
+- One shared IRSA role for all backend pods, scoped to all DynamoDB tables + SNS publish
 
 Grab the outputs you'll need next:
 ```bash
@@ -159,6 +175,12 @@ step 3. `k8s/services/users-deployment.yaml` also has
 `terraform output -raw sns_user_registered_topic_arn`.
 `k8s/frontend/deployment.yaml` has `<ECR_REPO_URL_FRONTEND>:latest`.
 
+`users-service` (SMTP for OTP emails) and `chatbot-service` (Groq) also
+need an `app-secrets` k8s Secret at runtime — see `k8s/app-secrets.example.yaml`
+for the shape. In CI this is created automatically from GitHub Actions
+secrets (see "CI/CD" below); for a manual/local deploy, copy that file,
+fill in real values, and `kubectl apply -f` it yourself.
+
 ## 5. Deploy to the cluster
 
 ```bash
@@ -187,16 +209,21 @@ http://<alb-hostname>/accounts/docs       -> Swagger UI for the accounts service
 
 | Service | Method | Path | Description |
 |---|---|---|---|
-| users | POST | `/users/register` | Register; publishes SNS on first-time registration |
+| users | POST | `/users/register` | Register; requires a verified OTP first; publishes SNS on first-time registration |
 | users | POST | `/users/login` | Login |
 | users | GET | `/users/{id}` | Get a user |
+| users | PATCH | `/users/{id}` | Update profile — `full_name` and/or `profile_photo` only |
+| users | POST | `/users/otp/send` | Email a 6-digit verification code (5 min expiry) |
+| users | POST | `/users/otp/verify` | Verify a code before registering |
+| chatbot | POST | `/chatbot/message` | `{message, history}` -> `{reply}`, via Groq |
 | accounts | POST | `/accounts` | Create an account |
 | accounts | GET | `/accounts` | List accounts |
 | accounts | GET | `/accounts/{id}` | Get one account |
 | accounts | DELETE | `/accounts/{id}` | Delete an account |
 | transactions | POST | `/transactions` | Deposit or withdraw (atomic, overdraft-safe) |
 | transactions | GET | `/transactions/{account_id}` | List an account's transactions |
-| the other 17 | POST/GET/DELETE | `/{service}/items[/​{id}]` | Generic CRUD, same shape on every one |
+| transfers | POST | `/transfers` | Move money; body includes `sender_name`/`sender_email`, shown to the recipient |
+| the other 16 | POST/GET/DELETE | `/{service}/items[/​{id}]` | Generic CRUD, same shape on every one |
 
 ## CI/CD (fully automated)
 
@@ -204,7 +231,8 @@ http://<alb-hostname>/accounts/docs       -> Swagger UI for the accounts service
 (or manually via "Run workflow"):
 
 ```
-terraform apply  →  build & push all 21 images to ECR  →  kubectl apply (all manifests)
+terraform apply  →  build & push all 22 images to ECR  →  sync app-secrets (SMTP + Groq)
+                                                         →  kubectl apply (all manifests)
                                                          →  wait for every rollout
                                                          →  wait for ALB
                                                          →  print the single ingress URL
@@ -214,10 +242,12 @@ Two jobs: `terraform` provisions/updates infra and exposes its outputs
 (a JSON map of service name → ECR repo URL, the shared backend IRSA role
 ARN, and the SNS topic ARN) to the `deploy` job, which loops over every
 service, builds and pushes its image, renders each k8s manifest
-(substituting those outputs in via `sed` instead of hand-editing 21 files),
-applies them all, waits for each deployment's rollout, and polls the
-Ingress until the ALB hostname shows up — that URL is written to the job
-summary.
+(substituting those outputs in via `sed` instead of hand-editing 22 files),
+**creates/updates the `app-secrets` k8s Secret directly from GitHub
+Actions secrets** (SMTP credentials + `GROQ_API_KEY` — never written to
+the repo or a file on disk), applies everything, waits for each
+deployment's rollout, and polls the Ingress until the ALB hostname shows
+up — that URL is written to the job summary.
 
 **One-time setup before the first CI run:**
 
@@ -233,17 +263,30 @@ summary.
    table (`veerabank-terraform-locks`) that `terraform/main.tf`'s
    `backend "s3"` block already points at. Safe to re-run.
 
-2. **GitHub secrets** (repo → Settings → Secrets and variables → Actions):
+2. **GitHub secrets** (repo → Settings → Secrets and variables → Actions —
+   or set them on a GitHub **Environment**, e.g. `production`, and add
+   `environment: production` to the jobs in `deploy.yml`, if you want
+   environment-scoped protection rules on top):
    - `AWS_ACCESS_KEY_ID`
    - `AWS_SECRET_ACCESS_KEY`
    (an IAM user/role with EKS, EC2, VPC, IAM, DynamoDB, ECR, S3, RDS,
    Lambda, SES, and SNS/SQS permissions)
+   - `SMTP_USER`, `SMTP_APP_PASSWORD` — a Gmail address + app password
+     `users-service` sends OTP and login-notification emails from.
+     `SMTP_APP_PASSWORD` is a Google Account **App Password**
+     (Google Account → Security → 2-Step Verification → App passwords),
+     not your normal Gmail password. (Host/port/from-address default to
+     Gmail's — nothing else to set.)
+   - `GROQ_API_KEY` — for the chatbot widget, from
+     [console.groq.com](https://console.groq.com/keys).
 
 3. Push to `main` — the whole stack stands up from nothing to a live ALB URL
    with no manual steps.
 
 Subsequent pushes just update the image and re-apply manifests (terraform
-apply is a no-op if infra hasn't changed).
+apply is a no-op if infra hasn't changed). The `app-secrets` sync step runs
+every deploy too, so rotating a secret in GitHub and re-running the
+workflow (or pushing again) is all it takes to rotate it in the cluster.
 
 ## Notes
 
@@ -252,7 +295,12 @@ apply is a no-op if infra hasn't changed).
 - SNS topic `user-registered` has no subscribers by default — uncomment
   `aws_sns_topic_subscription` in `terraform/sns.tf` and set a real email to
   actually receive the welcome notifications.
-- The 17 generic services (`transfers`, `cards`, `loans`, ...) share one CRUD
+- If `app-secrets` isn't present (e.g. a fresh local cluster before the
+  first CI run), `users-service` logs and skips sending OTP emails instead
+  of failing the request, and `chatbot-service` returns a 503 with a clear
+  message instead of crashing — apply `k8s/app-secrets.example.yaml` (with
+  real values) to fix both.
+- The 16 generic services (`cards`, `loans`, ...) share one CRUD
   template — flesh out the business logic in `backend/services/<name>/app/main.py`
   as each one's real requirements get defined.
 - `users` password hashing (`hashlib.sha256`) is demo-grade — swap for

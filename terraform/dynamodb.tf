@@ -136,7 +136,32 @@ resource "aws_dynamodb_table" "users" {
   stream_view_type = "NEW_AND_OLD_IMAGES"
 }
 
-# Generic services whose items belong to one user (so the frontend/backend
+# ---------------------------------------------------------------------------
+# "otp_codes" table - short-lived email verification codes used by
+# users-service's /users/otp/send + /users/otp/verify (registration is
+# gated on a verified code - see backend/services/users). One item per
+# email; TTL cleans up expired codes and stale verified-flags automatically
+# so this table never needs manual pruning.
+# ---------------------------------------------------------------------------
+resource "aws_dynamodb_table" "otp_codes" {
+  name         = "${var.project_name}-${var.environment}-otp_codes"
+  billing_mode = var.dynamodb_billing_mode
+  hash_key     = "email"
+
+  attribute {
+    name = "email"
+    type = "S"
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+}
 # can list "my cards", "my loans", etc. via a Query instead of a table
 # Scan). audit-log, fraud-detection, admin, statements, and reports are
 # staff-facing/bank-wide views instead, so they don't get this GSI.
@@ -218,6 +243,7 @@ resource "aws_iam_policy" "dynamodb_app_access" {
             "${aws_dynamodb_table.users.arn}/index/*",
             aws_dynamodb_table.transfers.arn,
             "${aws_dynamodb_table.transfers.arn}/index/*",
+            aws_dynamodb_table.otp_codes.arn,
           ],
           [for t in aws_dynamodb_table.generic : t.arn],
           [for t in aws_dynamodb_table.generic : "${t.arn}/index/*"],

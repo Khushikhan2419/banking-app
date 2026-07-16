@@ -13,7 +13,9 @@ locals {
   ]
 
   # Every backend microservice (used for ECR repos + IRSA policy).
-  backend_services = concat(["accounts", "transactions", "users", "transfers"], local.generic_services)
+  # chatbot is stateless (just calls the Groq API, no DynamoDB table of its
+  # own) so it's listed directly here rather than in generic_services.
+  backend_services = concat(["accounts", "transactions", "users", "transfers", "chatbot"], local.generic_services)
 
   # Everything that gets its own ECR repo, including the frontend.
   all_images = concat(local.backend_services, ["frontend"])

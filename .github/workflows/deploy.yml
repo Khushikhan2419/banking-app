@@ -1,5 +1,16 @@
+name: Deploy Cloud Bank
 
-name: Deploy VeeraBank
+# Two jobs, matching the README's "CI/CD (fully automated)" section:
+#   terraform  ->  provisions/updates infra, exposes outputs to `deploy`
+#   deploy     ->  builds & pushes every image, renders k8s manifests
+#                  (sed-substituting the terraform outputs in), syncs the
+#                  app-secrets Secret (SMTP + Groq) from GitHub Actions
+#                  secrets, applies everything, waits for rollouts + ALB.
+#
+# One-time setup (see README "CI/CD" section for the full list):
+#   - bash scripts/bootstrap-state.sh (once, for the Terraform S3 backend)
+#   - GitHub secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+#     SMTP_USER, SMTP_APP_PASSWORD, GROQ_API_KEY
 
 on:
   push:
@@ -8,32 +19,18 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  PROJECT_NAME: veerabank
-  ENVIRONMENT: dev
-  EKS_CLUSTER_NAME: veerabank-dev-eks
   NAMESPACE: veerabank
 
-permissions:
-  id-token: write   # not used yet (static keys below), kept for future OIDC swap
-  contents: read
-
 jobs:
-  # ---------------------------------------------------------------------
-  # 1. Terraform: VPC, EKS, 20 DynamoDB tables, 21 ECR repos, SNS topic,
-  #    ALB controller, IRSA roles
-  # ---------------------------------------------------------------------
   terraform:
+    name: Terraform apply
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: terraform
     outputs:
-      ecr_repository_urls: ${{ steps.tf_out.outputs.ecr_repository_urls }}
-      backend_irsa_role_arn: ${{ steps.tf_out.outputs.backend_irsa_role_arn }}
-      sns_user_registered_topic_arn: ${{ steps.tf_out.outputs.sns_user_registered_topic_arn }}
-      users_db_creds_bucket: ${{ steps.tf_out.outputs.users_db_creds_bucket }}
-      users_db_creds_key: ${{ steps.tf_out.outputs.users_db_creds_key }}
-      transactions_history_api_url: ${{ steps.tf_out.outputs.transactions_history_api_url }}
+      ecr_repository_urls: ${{ steps.tf-out.outputs.ecr_repository_urls }}
+      backend_irsa_role_arn: ${{ steps.tf-out.outputs.backend_irsa_role_arn }}
+      sns_user_registered_topic_arn: ${{ steps.tf-out.outputs.sns_user_registered_topic_arn }}
+      transactions_history_api_url: ${{ steps.tf-out.outputs.transactions_history_api_url }}
+      eks_cluster_name: ${{ steps.tf-out.outputs.eks_cluster_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -44,41 +41,25 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.9.0"
 
-      - name: Ensure remote state bucket + lock table exist
-        working-directory: .
-        run: bash scripts/bootstrap-state.sh
+      - name: terraform init & apply
+        working-directory: terraform
+        run: |
+          terraform init
+          terraform apply -auto-approve
 
-      - name: Terraform Init
-        run: terraform init
-
-      - name: Terraform Apply
-        env:
-          # Set these as repo secrets (Settings -> Secrets and variables ->
-          # Actions). Both are optional: if either is blank, that piece
-          # (ops SNS email alert / per-user SES welcome email) is skipped
-          # by terraform, but nothing fails.
-          TF_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL }}
-          TF_VAR_ses_sender_email: ${{ secrets.SES_SENDER_EMAIL }}
-        run: terraform apply -auto-approve
-
-      - name: Capture outputs
-        id: tf_out
+      - name: Collect outputs
+        id: tf-out
+        working-directory: terraform
         run: |
           echo "ecr_repository_urls=$(terraform output -json ecr_repository_urls | jq -c .)" >> "$GITHUB_OUTPUT"
           echo "backend_irsa_role_arn=$(terraform output -raw backend_irsa_role_arn)" >> "$GITHUB_OUTPUT"
           echo "sns_user_registered_topic_arn=$(terraform output -raw sns_user_registered_topic_arn)" >> "$GITHUB_OUTPUT"
-          echo "users_db_creds_bucket=$(terraform output -raw users_db_creds_bucket)" >> "$GITHUB_OUTPUT"
-          echo "users_db_creds_key=$(terraform output -raw users_db_creds_key)" >> "$GITHUB_OUTPUT"
           echo "transactions_history_api_url=$(terraform output -raw transactions_history_api_url)" >> "$GITHUB_OUTPUT"
+          echo "eks_cluster_name=$(terraform output -raw eks_cluster_name)" >> "$GITHUB_OUTPUT"
 
-  # ---------------------------------------------------------------------
-  # 2. Build + push all 20 microservice images + frontend, deploy to EKS,
-  #    surface the single ingress URL
-  # ---------------------------------------------------------------------
   deploy:
+    name: Build, push, deploy
     needs: terraform
     runs-on: ubuntu-latest
     steps:
@@ -91,122 +72,110 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to ECR
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push all service images
-        env:
-          ECR_URLS_JSON: ${{ needs.terraform.outputs.ecr_repository_urls }}
-          IMAGE_TAG: ${{ github.sha }}
         run: |
-          echo "$ECR_URLS_JSON" | jq -r 'keys[]' | while read -r svc; do
-            url=$(echo "$ECR_URLS_JSON" | jq -r --arg s "$svc" '.[$s]')
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+      - name: Build & push every image
+        env:
+          ECR_URLS: ${{ needs.terraform.outputs.ecr_repository_urls }}
+        run: |
+          set -euo pipefail
+          echo "$ECR_URLS" | jq -r 'keys[]' | while read -r svc; do
+            url=$(echo "$ECR_URLS" | jq -r --arg s "$svc" '.[$s]')
             if [ "$svc" = "frontend" ]; then
-              ctx="frontend"
+              docker build -f frontend/Dockerfile -t "$url:${{ github.sha }}" -t "$url:latest" frontend
             else
-              ctx="backend"
+              docker build -f "backend/services/$svc/Dockerfile" -t "$url:${{ github.sha }}" -t "$url:latest" backend
             fi
-            echo "== Building $svc from $ctx (Dockerfile: $( [ "$svc" = "frontend" ] && echo frontend/Dockerfile || echo backend/services/$svc/Dockerfile )) =="
-            if [ "$svc" = "frontend" ]; then
-              docker build -f frontend/Dockerfile -t "$url:$IMAGE_TAG" -t "$url:latest" frontend
-            else
-              docker build -f "backend/services/$svc/Dockerfile" -t "$url:$IMAGE_TAG" -t "$url:latest" backend
-            fi
-            docker push "$url:$IMAGE_TAG"
+            docker push "$url:${{ github.sha }}"
             docker push "$url:latest"
           done
 
-      - name: Point kubectl at the cluster
-        run: aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
-
-      - name: Wait for AWS Load Balancer Controller webhook
-        run: |
-          # Terraform's helm_release for the ALB controller can report
-          # "deployed" a little before the pod is actually Ready and its
-          # mutating/validating webhook has live endpoints. Applying any
-          # Service/Ingress manifest before that happens fails with
-          # "no endpoints available for service aws-load-balancer-webhook-service".
-          # So wait here, with retries, before touching any manifests.
-          echo "Waiting for aws-load-balancer-controller rollout..."
-          kubectl -n kube-system rollout status deployment/aws-load-balancer-controller --timeout=180s
-
-          echo "Waiting for aws-load-balancer-webhook-service to have live endpoints..."
-          for i in $(seq 1 30); do
-            EP=$(kubectl -n kube-system get endpoints aws-load-balancer-webhook-service \
-              -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
-            if [ -n "$EP" ]; then
-              echo "Webhook endpoints ready: $EP"
-              break
-            fi
-            echo "Not ready yet ($i/30), retrying in 10s..."
-            sleep 10
-          done
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "${{ needs.terraform.outputs.eks_cluster_name }}"
 
       - name: Render manifests
+        # Same substitutions the README describes doing by hand ("Wire up
+        # the manifests"), scripted: every <ECR_REPO_URL_X> placeholder,
+        # <SNS_USER_REGISTERED_TOPIC_ARN>, <TRANSACTIONS_HISTORY_API_URL>,
+        # and the serviceaccount's IRSA role-arn annotation.
         env:
-          ECR_URLS_JSON: ${{ needs.terraform.outputs.ecr_repository_urls }}
-          IMAGE_TAG: ${{ github.sha }}
-          ROLE_ARN: ${{ needs.terraform.outputs.backend_irsa_role_arn }}
+          ECR_URLS: ${{ needs.terraform.outputs.ecr_repository_urls }}
+          IRSA_ROLE_ARN: ${{ needs.terraform.outputs.backend_irsa_role_arn }}
           SNS_TOPIC_ARN: ${{ needs.terraform.outputs.sns_user_registered_topic_arn }}
-          TRANSACTIONS_HISTORY_API_URL: ${{ needs.terraform.outputs.transactions_history_api_url }}
+          HISTORY_API_URL: ${{ needs.terraform.outputs.transactions_history_api_url }}
         run: |
-          mkdir -p rendered
+          set -euo pipefail
+          mkdir -p rendered/services rendered/frontend
 
-          sed "s|arn:aws:iam::<ACCOUNT_ID>:role/veerabank-dev-backend-dynamodb|$ROLE_ARN|" \
+          cp k8s/namespace.yaml rendered/namespace.yaml
+          cp k8s/ingress.yaml rendered/ingress.yaml
+
+          sed "s#eks.amazonaws.com/role-arn:.*#eks.amazonaws.com/role-arn: \"${IRSA_ROLE_ARN}\"#" \
             k8s/serviceaccount.yaml > rendered/serviceaccount.yaml
 
-          cp k8s/namespace.yaml k8s/ingress.yaml rendered/
-
-          # 20 backend microservices
-          for f in k8s/services/*-deployment.yaml; do
-            svc=$(basename "$f" -deployment.yaml)
-            env_name=$(echo "$svc" | tr '[:lower:]-' '[:upper:]_')
-            url=$(echo "$ECR_URLS_JSON" | jq -r --arg s "$svc" '.[$s]')
-            sed "s|<ECR_REPO_URL_${env_name}>:latest|$url:$IMAGE_TAG|" "$f" \
-              | sed "s|<SNS_USER_REGISTERED_TOPIC_ARN>|$SNS_TOPIC_ARN|" \
-              | sed "s|<TRANSACTIONS_HISTORY_API_URL>|$TRANSACTIONS_HISTORY_API_URL|" \
-              > "rendered/${svc}-deployment.yaml"
+          for f in k8s/services/*.yaml; do
+            svc=$(basename "$f" | sed -E 's/-(deployment|service)\.yaml$//')
+            placeholder="<ECR_REPO_URL_$(echo "$svc" | tr '[:lower:]-' '[:upper:]_')>:latest"
+            url=$(echo "$ECR_URLS" | jq -r --arg s "$svc" '.[$s] // empty')
+            out="rendered/services/$(basename "$f")"
+            sed \
+              -e "s#${placeholder}#${url}:${{ github.sha }}#" \
+              -e "s#<SNS_USER_REGISTERED_TOPIC_ARN>#${SNS_TOPIC_ARN}#" \
+              -e "s#<TRANSACTIONS_HISTORY_API_URL>#${HISTORY_API_URL}#" \
+              "$f" > "$out"
           done
-          cp k8s/services/*-service.yaml rendered/
 
-          # frontend
-          frontend_url=$(echo "$ECR_URLS_JSON" | jq -r '.frontend')
-          sed "s|<ECR_REPO_URL_FRONTEND>:latest|$frontend_url:$IMAGE_TAG|" \
-            k8s/frontend/deployment.yaml > rendered/frontend-deployment.yaml
-          cp k8s/frontend/service.yaml rendered/frontend-service.yaml
+          fe_url=$(echo "$ECR_URLS" | jq -r '.frontend')
+          sed "s#<ECR_REPO_URL_FRONTEND>:latest#${fe_url}:${{ github.sha }}#" \
+            k8s/frontend/deployment.yaml > rendered/frontend/deployment.yaml
+          cp k8s/frontend/service.yaml rendered/frontend/service.yaml
+
+      - name: Sync app-secrets (Gmail + Groq)
+        # Pulled straight from GitHub Actions secrets and written into the
+        # cluster - never written to a file in the repo, never logged.
+        # kubectl apply makes this idempotent, so re-running is safe.
+        # (Host/port/from-address for SMTP default to Gmail's in
+        # backend/common/mailer.py, so only these two SMTP values + the
+        # Groq key are needed.)
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_APP_PASSWORD: ${{ secrets.SMTP_APP_PASSWORD }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          set -euo pipefail
+          kubectl apply -f rendered/namespace.yaml
+          kubectl create secret generic app-secrets \
+            --namespace "$NAMESPACE" \
+            --from-literal=SMTP_USER="$SMTP_USER" \
+            --from-literal=SMTP_APP_PASSWORD="$SMTP_APP_PASSWORD" \
+            --from-literal=GROQ_API_KEY="$GROQ_API_KEY" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Apply manifests
         run: |
-          kubectl apply -f rendered/namespace.yaml
           kubectl apply -f rendered/serviceaccount.yaml
-          kubectl apply -f rendered/
+          kubectl apply -f rendered/services/
+          kubectl apply -f rendered/frontend/
+          kubectl apply -f rendered/ingress.yaml
 
       - name: Wait for rollouts
         run: |
-          for f in rendered/*-deployment.yaml; do
-            name=$(grep -m1 "^  name:" "$f" | awk '{print $2}')
-            echo "Waiting for deployment/$name..."
-            kubectl rollout status "deployment/$name" -n ${{ env.NAMESPACE }} --timeout=180s || true
+          set -euo pipefail
+          for f in rendered/services/*-deployment.yaml; do
+            name=$(basename "$f" -deployment.yaml)
+            kubectl rollout status "deployment/$name" -n "$NAMESPACE" --timeout=180s
           done
+          kubectl rollout status deployment/frontend -n "$NAMESPACE" --timeout=180s
 
-      - name: Wait for ALB and print the ingress URL
+      - name: Wait for ALB and print URL
         run: |
-          echo "Waiting for ALB hostname..."
+          set -euo pipefail
+          HOST=""
           for i in $(seq 1 30); do
-            HOST=$(kubectl get ingress veerabank-ingress -n ${{ env.NAMESPACE }} \
-              -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            if [ -n "$HOST" ]; then
-              echo "http://$HOST" > ingress_url.txt
-              break
-            fi
+            HOST=$(kubectl get ingress veerabank-ingress -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [ -n "$HOST" ] && break
             sleep 10
           done
-          if [ ! -s ingress_url.txt ]; then
-            echo "ALB hostname not ready yet — check 'kubectl get ingress -n ${{ env.NAMESPACE }}' manually."
-            exit 0
-          fi
-          URL=$(cat ingress_url.txt)
-          echo "### 🚀 Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
-          echo "Frontend: $URL/" >> "$GITHUB_STEP_SUMMARY"
-          echo "Users API: $URL/users/register" >> "$GITHUB_STEP_SUMMARY"
-          echo "$URL"
-
+          echo "### Cloud Bank is live at: http://${HOST:-<pending - check kubectl get ingress>}/" >> "$GITHUB_STEP_SUMMARY"

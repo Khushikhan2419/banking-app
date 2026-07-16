@@ -44,7 +44,9 @@ AWS banking app: Terraform-provisioned infra, **21 FastAPI microservices +
   check enforced inside the transaction itself (no possible overdraft
   race). It has its own DynamoDB table with GSIs so either party can
   pull their transfer history. Every transfer also carries the sender's
-  name and email, so the recipient always knows who paid them.
+  name and email, so the recipient always knows who paid them, and both
+  sides get an email — a "you sent $X" receipt to the sender, and a
+  "you received $X" notice to the recipient (looked up via users-service).
 - Everything else (cards, loans, payments, ...) still uses one simple
   DynamoDB table per service.
 

@@ -9,8 +9,10 @@ service.
 """
 import hashlib
 import os
+import random
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
@@ -21,6 +23,7 @@ from pydantic import BaseModel, EmailStr, Field
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from common.aws_clients import table, sns_publish
+from common.mailer import send_otp_email, send_login_email
 
 app = FastAPI(title="VeeraBank Users Service", version="1.0.0")
 router = APIRouter(prefix="/users")
@@ -28,6 +31,10 @@ router = APIRouter(prefix="/users")
 SNS_TOPIC_ENV = "USER_REGISTERED_TOPIC_ARN"
 
 users_table = table("users")
+otp_table = table("otp_codes")
+
+OTP_TTL_SECONDS = 5 * 60          # code is valid for 5 minutes
+OTP_VERIFIED_TTL_SECONDS = 15 * 60  # verified flag stays good for 15 minutes, long enough to finish signup
 
 # Base URL of the (now general-purpose) history API Gateway stage - same
 # one the transactions-service uses. Optional: registration still succeeds
@@ -70,6 +77,17 @@ class RegisterRequest(BaseModel):
     password: str
 
 
+class SendOtpRequest(BaseModel):
+    email: EmailStr
+    purpose: str = "signup"
+
+
+class VerifyOtpRequest(BaseModel):
+    email: EmailStr
+    code: str
+    purpose: str = "signup"
+
+
 class UpdateProfileRequest(BaseModel):
     """Profile self-service is deliberately narrow: a person can change how
     they're displayed (name, photo) but not their email/phone/password
@@ -88,10 +106,62 @@ def root():
     return {"service": "users-service", "status": "running"}
 
 
+@router.post("/otp/send")
+def send_otp(req: SendOtpRequest):
+    if req.purpose == "signup" and _get_by_email(req.email):
+        raise HTTPException(status_code=409, detail="User already registered")
+
+    code = f"{random.randint(0, 999999):06d}"
+    now = int(time.time())
+    otp_table.put_item(Item={
+        "email": req.email,
+        "purpose": req.purpose,
+        "code": code,
+        "verified": False,
+        "created_at": now,
+        # DynamoDB TTL attribute - the item auto-expires so codes and stale
+        # verified-flags don't pile up (see terraform/dynamodb.tf).
+        "expires_at": now + max(OTP_TTL_SECONDS, OTP_VERIFIED_TTL_SECONDS),
+        "code_expires_at": now + OTP_TTL_SECONDS,
+    })
+
+    sent = send_otp_email(req.email, code, purpose=req.purpose)
+    return {"sent": sent, "expires_in": OTP_TTL_SECONDS}
+
+
+@router.post("/otp/verify")
+def verify_otp(req: VerifyOtpRequest):
+    resp = otp_table.get_item(Key={"email": req.email})
+    item = resp.get("Item")
+    if not item or item.get("purpose") != req.purpose:
+        raise HTTPException(status_code=400, detail="No code was sent to this email")
+    if int(time.time()) > int(item.get("code_expires_at", 0)):
+        raise HTTPException(status_code=400, detail="Code expired, request a new one")
+    if item.get("code") != req.code.strip():
+        raise HTTPException(status_code=400, detail="Incorrect code")
+
+    otp_table.update_item(
+        Key={"email": req.email},
+        UpdateExpression="SET verified = :v",
+        ExpressionAttributeValues={":v": True},
+    )
+    return {"verified": True}
+
+
+def _otp_is_verified(email: str, purpose: str = "signup") -> bool:
+    resp = otp_table.get_item(Key={"email": email})
+    item = resp.get("Item")
+    if not item or item.get("purpose") != purpose or not item.get("verified"):
+        return False
+    return int(time.time()) <= int(item.get("expires_at", 0))
+
+
 @router.post("/register")
 def register(req: RegisterRequest):
     if _get_by_email(req.email):
         raise HTTPException(status_code=409, detail="User already registered")
+    if not _otp_is_verified(req.email, "signup"):
+        raise HTTPException(status_code=400, detail="Please verify your email with the code we sent before creating an account")
 
     user_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
@@ -113,6 +183,11 @@ def register(req: RegisterRequest):
         if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
             raise HTTPException(status_code=409, detail="User already registered")
         raise
+
+    try:
+        otp_table.delete_item(Key={"email": req.email})
+    except Exception as exc:  # noqa: BLE001 - cleanup only, TTL will catch it anyway
+        print(f"[users] failed to clean up OTP record: {exc}")
 
     _write_history_event(
         user_id,
@@ -148,6 +223,13 @@ def login(req: LoginRequest):
     user = _get_by_email(req.email)
     if not user or user["password_hash"] != _hash_password(req.password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    try:
+        when_str = datetime.now(timezone.utc).strftime("%b %d, %Y %H:%M UTC")
+        send_login_email(user["email"], user["full_name"], when_str)
+    except Exception as exc:  # noqa: BLE001 - never fail a login over a notification email
+        print(f"[users] failed to send login-notification email: {exc}")
+
     return {
         "user_id": user["user_id"],
         "email": user["email"],

@@ -86,6 +86,13 @@ spec:
                 name: notifications-svc
                 port:
                   number: 80
+          - path: /chatbot
+            pathType: Prefix
+            backend:
+              service:
+                name: chatbot-svc
+                port:
+                  number: 80
           - path: /kyc
             pathType: Prefix
             backend:

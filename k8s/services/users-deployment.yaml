@@ -31,6 +31,20 @@ spec:
               value: "<SNS_USER_REGISTERED_TOPIC_ARN>"
             - name: TRANSACTIONS_HISTORY_API_URL
               value: "<TRANSACTIONS_HISTORY_API_URL>"
+            # Mail (OTP + login-notification emails) - only the two secrets
+            # come from app-secrets (populated by the deploy workflow from
+            # GitHub Actions secrets). Host/port/from-address default to
+            # Gmail's in backend/common/mailer.py, so nothing else is needed.
+            - name: SMTP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: SMTP_USER
+            - name: SMTP_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: SMTP_APP_PASSWORD
           resources:
             requests:
               cpu: "50m"

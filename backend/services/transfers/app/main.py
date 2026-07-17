@@ -60,7 +60,6 @@ class TransferRequest(BaseModel):
     note: Optional[str] = None
     sender_name: Optional[str] = Field(None, description="Display name of the sender, sent by the client alongside the transfer")
     sender_email: Optional[str] = Field(None, description="Email of the sender, sent by the client alongside the transfer")
-    account_type: Optional[str] = Field(None, description="'savings' or 'current' - mandatory on the frontend send-money form")
 
     @field_validator("amount")
     @classmethod
@@ -80,7 +79,6 @@ class Transfer(BaseModel):
     note: Optional[str] = None
     sender_name: Optional[str] = None
     sender_email: Optional[str] = None
-    account_type: Optional[str] = None
     status: str
     created_at: str
 
@@ -155,7 +153,6 @@ def create_transfer(req: TransferRequest):
         "note": req.note or "",
         "sender_name": req.sender_name or "",
         "sender_email": req.sender_email or "",
-        "account_type": req.account_type or "",
         "status": "completed",
         "created_at": now,
     }
